@@ -1,0 +1,24 @@
+[package]
+name = "pns-runtime-api"
+version = "0.1.0"
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+
+[dependencies]
+polkadot-sdk = {workspace = true, features = ["runtime"] }
+scale-info   = {workspace = true}
+serde        = {workspace = true}
+codec        = {workspace = true}
+
+
+[dependencies.pns-types]
+path = "../pns-types"
+default-features = false
+
+[features]
+default = ['std']
+std = ['polkadot-sdk/std', 'codec/std', 'scale-info/std', 'serde/std', 'pns-types/std']
+runtime-benchmarks = ['polkadot-sdk/runtime-benchmarks']
+try-runtime = ['polkadot-sdk/try-runtime']

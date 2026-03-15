@@ -1,0 +1,58 @@
+{
+  "pns": {
+    "getInfo": {
+      "description": "Get full name record by namehash (H256). Returns owner, expiry, capacity, fee, for_sale, last_block, and the block at which the record was read.",
+      "params": [
+        { "name": "node", "type": "H256" }
+      ],
+      "type": "Option<Json>"
+    },
+    "resolveName": {
+      "description": "Resolve a plain label (e.g. 'alice') to its full name record. Returns null if the name does not exist or is expired.",
+      "params": [
+        { "name": "name", "type": "Text" }
+      ],
+      "type": "Option<Json>"
+    },
+    "lookup": {
+      "description": "Get all DNS records stored for a namehash (H256). Returns an array of [record_type_code, bytes] pairs.",
+      "params": [
+        { "name": "node", "type": "H256" }
+      ],
+      "type": "Vec<(u32, Bytes)>"
+    },
+    "lookupByName": {
+      "description": "Get all DNS records for a plain label or dotted name (e.g. 'alice' or 'sub.alice'). Single round-trip equivalent of pns_nameToHash + pns_lookup.",
+      "params": [
+        { "name": "name", "type": "Text" }
+      ],
+      "type": "Vec<(u32, Bytes)>"
+    },
+    "getListing": {
+      "description": "Get the active marketplace listing for a plain label (e.g. 'alice'). Returns seller, price, expires_at, and the block at which the listing was read. Returns null if not listed.",
+      "params": [
+        { "name": "name", "type": "Text" }
+      ],
+      "type": "Option<Json>"
+    },
+    "nameToHash": {
+      "description": "Compute the namehash (H256) for a plain label or dotted name (e.g. 'alice' or 'sub.alice'). Returns null if the name is malformed. Use this to get the hash needed by pns_getInfo, pns_lookup, and pns_isUseable.",
+      "params": [
+        { "name": "name", "type": "Text" }
+      ],
+      "type": "Option<H256>"
+    },
+    "all": {
+      "description": "Return every registered name and its registrar info as an array of [namehash, info] pairs. Intended for indexers and explorers.",
+      "params": [],
+      "type": "Vec<(H256, Json)>"
+    },
+    "isUseable": {
+      "description": "Check whether a name (by namehash) is currently registered and not expired. Returns true if the name is in its active registration period.",
+      "params": [
+        { "name": "node", "type": "H256" }
+      ],
+      "type": "bool"
+    }
+  }
+}

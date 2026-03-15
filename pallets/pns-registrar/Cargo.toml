@@ -1,0 +1,39 @@
+[package]
+authors = ['ProdigalWon']
+description = 'Ens code is rewritten using substrate. Updated by the ProdigalWon to 2026 standards.'
+edition = '2024'
+license = 'Unlicense'
+name = "pns-registrar"
+publish = false
+repository = 'https://github.com/prodigalwon/pns-pallets'
+version = "0.1.0"
+
+[package.metadata.docs.rs]
+targets = ['x86_64-unknown-linux-gnu']
+
+
+[dependencies]
+polkadot-sdk = { workspace = true, features = ["runtime"] }
+codec = { workspace = true }
+scale-info = { workspace = true }
+serde = { workspace = true }
+
+
+[dependencies.pns-types]
+default-features = false
+path = "../pns-types"
+
+[dev-dependencies.pns-resolvers]
+path = "../pns-resolvers"
+
+[features]
+default = ['std']
+std = [
+    'polkadot-sdk/std',
+    'codec/std',
+    'scale-info/std',
+    'serde/std',
+    'pns-types/std',
+]
+runtime-benchmarks = ['polkadot-sdk/runtime-benchmarks']
+try-runtime = ['polkadot-sdk/try-runtime']

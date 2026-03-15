@@ -1,0 +1,21 @@
+[package]
+name = "pns-ddns"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+polkadot-sdk = { workspace = true, features = ["node"] }
+serde         = { workspace = true }
+serde_json    = "1"
+
+axum          = { workspace = true }
+tracing       = { workspace = true }
+tokio         = { version = "1", default-features = false, features = ["net", "rt", "macros"] }
+
+pns-types       = { path = "../pns-types",       features = ["std"] }
+pns-runtime-api = { path = "../pns-runtime-api", features = ["std"] }
+pns-registrar   = { path = "../pns-registrar",   features = ["std"] }
+pns-resolvers   = { path = "../pns-resolvers",   features = ["std"] }
+
+[dev-dependencies]
+tracing-subscriber = "0.3"

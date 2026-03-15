@@ -1,0 +1,39 @@
+[package]
+authors = ['PNS Contributors']
+description = 'On-chain name marketplace for PNS — list, cancel, and atomically purchase registered names.'
+edition = '2024'
+license = 'Unlicense'
+name = "pns-marketplace"
+publish = false
+repository = 'https://github.com/prodigalwon/pns-pallets'
+version = "0.1.0"
+
+[package.metadata.docs.rs]
+targets = ['x86_64-unknown-linux-gnu']
+
+[dependencies]
+polkadot-sdk = { workspace = true, features = ["runtime"] }
+codec = { workspace = true }
+scale-info = { workspace = true }
+serde = { workspace = true }
+
+[dependencies.pns-types]
+default-features = false
+path = "../pns-types"
+
+[dependencies.pns-registrar]
+default-features = false
+path = "../pns-registrar"
+
+[features]
+default = ['std']
+std = [
+    'polkadot-sdk/std',
+    'codec/std',
+    'scale-info/std',
+    'serde/std',
+    'pns-types/std',
+    'pns-registrar/std',
+]
+runtime-benchmarks = ['polkadot-sdk/runtime-benchmarks']
+try-runtime = ['polkadot-sdk/try-runtime']
