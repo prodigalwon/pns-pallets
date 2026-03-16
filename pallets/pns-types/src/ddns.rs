@@ -55,6 +55,8 @@ impl From<codec_type::RecordType> for RecordType {
             codec_type::RecordType::PUBKEY2 => RecordType::Unknown(65288),
             codec_type::RecordType::PUBKEY3 => RecordType::Unknown(65289),
             codec_type::RecordType::ORIGIN => RecordType::Unknown(65290),
+            codec_type::RecordType::IPFS => RecordType::Unknown(65291),
+            codec_type::RecordType::CONTENT => RecordType::Unknown(65292),
             codec_type::RecordType::Unknown(unknow) => RecordType::Unknown(unknow),
             codec_type::RecordType::ZERO => RecordType::ZERO,
         }
@@ -111,6 +113,8 @@ impl Into<codec_type::RecordType> for RecordType {
             RecordType::Unknown(65288) => codec_type::RecordType::PUBKEY2,
             RecordType::Unknown(65289) => codec_type::RecordType::PUBKEY3,
             RecordType::Unknown(65290) => codec_type::RecordType::ORIGIN,
+            RecordType::Unknown(65291) => codec_type::RecordType::IPFS,
+            RecordType::Unknown(65292) => codec_type::RecordType::CONTENT,
             RecordType::Unknown(unknow) => codec_type::RecordType::Unknown(unknow),
             RecordType::ZERO => codec_type::RecordType::ZERO,
             _ => panic!("unsupported record type"),
@@ -168,6 +172,12 @@ pub mod codec_type {
         /// stored as 32 raw bytes. Serves as on-chain proof of purchase validity
         /// (IANA private use 65290).
         ORIGIN,
+        /// Public key of a TLS certificate for this domain (IANA private use 65291).
+        /// Allows clients to verify TLS without a traditional CA chain.
+        IPFS,
+        /// IPFS CID pointing to a website or dapp hosted on IPFS (IANA private use 65292).
+        /// Store the raw CID string. Distinct from AVATAR (65286) which is scoped to profile images.
+        CONTENT,
         /// [RFC 1035](https://tools.ietf.org/html/rfc1035) IPv4 Address record
         A,
         /// [RFC 3596](https://tools.ietf.org/html/rfc3596) IPv6 address record
@@ -259,7 +269,7 @@ pub mod codec_type {
     }
 
     impl RecordType {
-        pub fn all() -> [Self; 47] {
+        pub fn all() -> [Self; 49] {
             [
                 RecordType::A,
                 RecordType::AAAA,
@@ -309,6 +319,8 @@ pub mod codec_type {
                 RecordType::PUBKEY2,
                 RecordType::PUBKEY3,
                 RecordType::ORIGIN,
+                RecordType::IPFS,
+                RecordType::CONTENT,
             ]
         }
     }

@@ -33,7 +33,7 @@ A registered name like `rico.dot` can resolve to:
 
 ## Record Types
 
-PNS extends standard DNS with Polkadot-native record types in the IANA private use range (65280–65287):
+PNS extends standard DNS with Polkadot-native record types in the IANA private use range (65280–65292):
 
 | Type | Code | Description |
 |---|---|---|
@@ -43,11 +43,13 @@ PNS extends standard DNS with Polkadot-native record types in the IANA private u
 | `PARA` | 65283 | Parachain ID |
 | `PROXY` | 65284 | PNS name pointer (CNAME equivalent) |
 | `PUBKEY1` | 65285 | Public key slot 1 (up to 1024 bytes; accommodates post-quantum keys) |
-| `AVATAR` | 65286 | IPFS CID for profile image |
+| `AVATAR` | 65286 | IPFS CID of the owner's profile image — store the raw CID string (e.g. `bafybeig...`) |
 | `CONTRACT` | 65287 | Smart contract address (ink!/Wasm or EVM) |
 | `PUBKEY2` | 65288 | Public key slot 2 |
 | `PUBKEY3` | 65289 | Public key slot 3 |
 | `ORIGIN` | 65290 | 32-byte block hash of the original registration — on-chain proof of purchase |
+| `IPFS` | 65291 | TLS certificate public key for this domain — allows clients to verify TLS without a traditional CA chain |
+| `CONTENT` | 65292 | IPFS CID of a website or dapp — store the raw CID string (e.g. `bafybeig...`); browsers and gateways resolve this to serve the site |
 
 Standard DNS record types (A, AAAA, CNAME, TXT, MX, NS, etc.) are also supported.
 
