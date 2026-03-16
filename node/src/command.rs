@@ -4,6 +4,7 @@ use crate::{
 	cli::{Cli, Subcommand},
 	service,
 };
+use pns_ddns;
 use frame_benchmarking_cli::{BenchmarkCmd, ExtrinsicFactory, SUBSTRATE_REFERENCE_HARDWARE};
 use sc_cli::SubstrateCli;
 use sc_service::PartialComponents;
@@ -184,6 +185,13 @@ pub fn run() -> sc_cli::Result<()> {
 			runner.sync_run(|config| cmd.run::<Block>(&config))
 		},
 		None => {
+			let dns_config = pns_ddns::DnsConfig {
+				port:             cli.dns_port,
+				workers:          cli.dns_workers,
+				cores:            cli.dns_cores.clone(),
+				min_response_ms:  cli.dns_min_response_ms,
+			};
+			let no_dns = cli.no_dns;
 			let runner = cli.create_runner(&cli.run)?;
 			runner.run_node_until_exit(|config| async move {
 				match config.network.network_backend {
@@ -192,10 +200,10 @@ pub fn run() -> sc_cli::Result<()> {
 							solochain_template_runtime::opaque::Block,
 							<solochain_template_runtime::opaque::Block as sp_runtime::traits::Block>::Hash,
 						>,
-					>(config)
+					>(config, no_dns, dns_config)
 					.map_err(sc_cli::Error::Service),
 					sc_network::config::NetworkBackendType::Litep2p =>
-						service::new_full::<sc_network::Litep2pNetworkBackend>(config)
+						service::new_full::<sc_network::Litep2pNetworkBackend>(config, no_dns, dns_config)
 							.map_err(sc_cli::Error::Service),
 				}
 			})

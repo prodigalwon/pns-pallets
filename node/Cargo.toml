@@ -64,6 +64,7 @@ frame-benchmarking-cli = { workspace = true, default-features = true }
 solochain-template-runtime = { workspace = true }
 pns-runtime-api = { workspace = true, default-features = true }
 pns-types = { workspace = true, default-features = true }
+pns-ddns = { workspace = true }
 hickory-proto = { workspace = true }
 
 [build-dependencies]

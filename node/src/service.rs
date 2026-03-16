@@ -131,6 +131,8 @@ pub fn new_full<
 	N: sc_network::NetworkBackend<Block, <Block as sp_runtime::traits::Block>::Hash>,
 >(
 	config: Configuration,
+	no_dns: bool,
+	dns_config: pns_ddns::DnsConfig,
 ) -> Result<TaskManager, ServiceError> {
 	let sc_service::PartialComponents {
 		client,
@@ -252,7 +254,7 @@ pub fn new_full<
 		let aura = sc_consensus_aura::start_aura::<AuraPair, _, _, _, _, _, _, _, _, _, _>(
 			StartAuraParams {
 				slot_duration,
-				client,
+				client: client.clone(),
 				select_chain,
 				block_import,
 				proposer_factory,
@@ -329,6 +331,17 @@ pub fn new_full<
 			None,
 			sc_consensus_grandpa::run_grandpa_voter(grandpa_config)?,
 		);
+	}
+
+	// ── PNS DNS server ───────────────────────────────────────────────────────
+	if !no_dns {
+		pns_ddns::start_dns_server::<
+			FullClient,
+			Block,
+			u64,
+			solochain_template_runtime::Balance,
+			solochain_template_runtime::AccountId,
+		>(client.clone(), dns_config);
 	}
 
 	Ok(task_manager)

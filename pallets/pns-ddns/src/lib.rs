@@ -17,6 +17,38 @@ use polkadot_sdk::sp_blockchain::{Error as BlockChainError, HeaderBackend, Heade
 use polkadot_sdk::sp_runtime::traits::Block as BlockT;
 use tracing::error;
 
+pub mod authority;
+pub mod dns_server;
+pub mod metrics;
+
+pub use dns_server::start_dns_server;
+
+/// Maximum CNAME chain depth enforced by BlockChainAuthority during record construction.
+pub const MAX_CNAME_DEPTH: usize = 8;
+
+/// Configuration for the dedicated DNS server runtime.
+#[derive(Clone, Debug)]
+pub struct DnsConfig {
+    /// UDP port for the DNS listener (default 53).
+    pub port: u16,
+    /// Number of worker threads in the dedicated DNS tokio runtime (default 2).
+    pub workers: usize,
+    /// Optional list of CPU core IDs to pin DNS worker threads to.
+    /// If None, the highest-numbered cores are selected automatically.
+    pub cores: Option<Vec<usize>>,
+    /// Minimum response time in milliseconds enforced by the interval-based
+    /// response queue (default 5).
+    pub min_response_ms: u64,
+}
+
+impl Default for DnsConfig {
+    fn default() -> Self {
+        Self { port: 53, workers: 2, cores: None, min_response_ms: 5 }
+    }
+}
+
+// ── Axum HTTP REST server (unchanged) ────────────────────────────────────────
+
 pub struct ServerDeps<Client, Backend, Block, Config>
 where
     Block: BlockT,
