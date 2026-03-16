@@ -42,7 +42,7 @@ use sp_version::RuntimeVersion;
 
 // Local module imports
 use super::{
-	AccountId, Aura, Balance, Balances, Block, BlockNumber, Hash, MultiSignature, Nonce,
+	AccountId, Aura, Balance, Balances, Block, BlockNumber, Hash, Nonce,
 	PalletInfo, Runtime, RuntimeCall, RuntimeEvent, RuntimeFreezeReason, RuntimeHoldReason,
 	RuntimeOrigin, RuntimeTask, System, Timestamp, DAYS, EXISTENTIAL_DEPOSIT, MILLI_SECS_PER_BLOCK,
 	SLOT_DURATION, VERSION,
@@ -238,7 +238,6 @@ impl pns_registrar::price_oracle::Config for Runtime {
 impl pns_registrar::registry::Config for Runtime {
     type WeightInfo = ();
     type Registrar = pns_registrar::registrar::Pallet<Runtime>;
-    type ResolverId = u32;
     type ManagerOrigin = EnsureRootAsAccountId;
     type Ss58Updater = PnsSs58Updater;
     type RecordCleaner = PnsRecordCleaner;
@@ -295,7 +294,6 @@ impl pns_resolvers::resolvers::RegistryChecker for PnsRegistryChecker {
 }
 
 impl pns_registrar::registrar::Config for Runtime {
-    type ResolverId = u32;
     type Registry = pns_registrar::registry::Pallet<Runtime>;
     type Currency = Balances;
     type NowProvider = Timestamp;
@@ -319,10 +317,7 @@ impl pns_resolvers::resolvers::Config for Runtime {
     const OFFCHAIN_PREFIX: &'static [u8] = b"pns/";
     type WeightInfo = ();
     type MaxContentLen = MaxContentLen;
-    type AccountIndex = u32;
     type RegistryChecker = PnsRegistryChecker;
-    type Public = <MultiSignature as sp_runtime::traits::Verify>::Signer;
-    type Signature = MultiSignature;
 }
 
 parameter_types! {

@@ -91,8 +91,6 @@ fn testnet_genesis(
 		pns_registry: pns_registrar::registry::GenesisConfig {
 			official: Some(root),
 			origin: vec![],
-			operators: vec![],
-			token_approvals: vec![],
 		},
 		pns_registrar: pns_registrar::registrar::GenesisConfig {
 			infos: Default::default(),

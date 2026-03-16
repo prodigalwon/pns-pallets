@@ -3,8 +3,8 @@
 This module provides functionality for domain name resolution. Most of these interfaces are interfaces provided for subsequent cooperation with wallets.
 
 ### Module functions
-- `set_account` - sets the account resolve, which requires the domain to be available relative to that user (ownership of the domain, the domain is not expired)
-- `set_text` - set text parsing, same requirements as above
+- `set_text` - set text parsing, requires domain ownership and the domain to not be expired
+- `set_record` - set a DNS record, same requirements as above
 !*/
 
 use codec::{Encode, MaxEncodedLen, DecodeWithMemTracking};
@@ -14,12 +14,10 @@ pub use pallet::*;
 #[polkadot_sdk::frame_support::pallet]
 pub mod pallet {
     use super::*;
-    use codec::EncodeLike;
     use polkadot_sdk::frame_support::{dispatch::DispatchResult, pallet_prelude::*};
     use polkadot_sdk::frame_system::pallet_prelude::*;
     use pns_types::ddns::codec_type::RecordType;
     use scale_info::TypeInfo;
-    use polkadot_sdk::sp_runtime::traits::AtLeast32BitUnsigned;
 
     use super::RegistryChecker;
 
@@ -31,52 +29,13 @@ pub mod pallet {
 
         type MaxContentLen: Get<u32>;
 
-        type AccountIndex: Parameter + Member + AtLeast32BitUnsigned + Default + Copy;
-
         type RegistryChecker: RegistryChecker<AccountId = Self::AccountId>;
-
-        type Public: TypeInfo
-            + Decode
-            + Encode
-            + EncodeLike
-            + MaybeSerializeDeserialize
-            + core::fmt::Debug
-            + polkadot_sdk::sp_runtime::traits::IdentifyAccount<AccountId = Self::AccountId>;
-
-        type Signature: polkadot_sdk::sp_runtime::traits::Verify<Signer = Self::Public>
-            + codec::Codec
-            + EncodeLike
-            + MaybeSerializeDeserialize
-            + Clone
-            + Eq
-            + core::fmt::Debug
-            + TypeInfo;
     }
 
     pub type Content<T> = BoundedVec<u8, <T as Config>::MaxContentLen>;
 
     #[pallet::pallet]
     pub struct Pallet<T>(_);
-
-    #[derive(Encode, Decode, Clone, Eq, PartialEq, MaxEncodedLen, Debug, TypeInfo, DecodeWithMemTracking)]
-    #[derive(serde::Serialize, serde::Deserialize)]
-    pub enum Address<Id> {
-        Substrate([u8; 32]),
-        Bitcoin([u8; 25]),
-        Ethereum([u8; 20]),
-        Id(Id),
-    }
-
-    /// account_id mapping
-    #[pallet::storage]
-    pub type Accounts<T: Config> = StorageDoubleMap<
-        _,
-        Twox64Concat,
-        pns_types::DomainHash,
-        Twox64Concat,
-        Address<T::AccountId>,
-        (),
-    >;
 
     #[derive(Encode, Decode, Clone, Eq, PartialEq, MaxEncodedLen, Debug, TypeInfo, DecodeWithMemTracking)]
     #[derive(serde::Serialize, serde::Deserialize)]
@@ -118,14 +77,12 @@ pub mod pallet {
 
     #[pallet::genesis_config]
     pub struct GenesisConfig<T: Config> {
-        pub accounts: Vec<(pns_types::DomainHash, Address<T::AccountId>)>,
         pub texts: Vec<(pns_types::DomainHash, TextKind, Content<T>)>,
     }
 
     impl<T: Config> Default for GenesisConfig<T> {
         fn default() -> Self {
             GenesisConfig {
-                accounts: Vec::new(),
                 texts: Vec::new(),
             }
         }
@@ -134,9 +91,6 @@ pub mod pallet {
     #[pallet::genesis_build]
     impl<T: Config> BuildGenesisConfig for GenesisConfig<T> {
         fn build(&self) {
-            for (node, address_kind) in self.accounts.iter().cloned() {
-                Accounts::<T>::insert(node, address_kind, ());
-            }
             for (node, text_kind, text) in self.texts.iter().cloned() {
                 Texts::<T>::insert(node, text_kind, text);
             }
@@ -146,14 +100,6 @@ pub mod pallet {
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
-        AddressChanged {
-            node: pns_types::DomainHash,
-            address: Address<T::AccountId>,
-        },
-        AddressRemoved {
-            node: pns_types::DomainHash,
-            address: Address<T::AccountId>,
-        },
         TextsChanged {
             node: pns_types::DomainHash,
             kind: TextKind,
@@ -168,11 +114,7 @@ pub mod pallet {
 
     #[pallet::error]
     pub enum Error<T> {
-        ParseAddressFailed,
         InvalidPermission,
-        NotSupportedIndex,
-        /// Address mapping does not exist for this node.
-        AddressNotFound,
         /// The SS58 record is managed by the chain (set on register/transfer/buy).
         /// Owners may not edit it directly via `set_record`.
         Ss58RecordProtected,
@@ -220,29 +162,6 @@ pub mod pallet {
 
     #[pallet::call]
     impl<T: Config> Pallet<T> {
-        /// Set an address mapping for a domain.
-        ///
-        /// `name` accepts two forms:
-        /// - `"sub.domain"` — targets the subdomain `sub.domain.<tld>`.
-        /// - `"domain"` (no dot) — targets the top-level domain `domain.<tld>`.
-        #[pallet::call_index(0)]
-        #[pallet::weight(T::WeightInfo::set_account())]
-        pub fn set_account(
-            origin: OriginFor<T>,
-            name: Vec<u8>,
-            address: Address<T::AccountId>,
-        ) -> DispatchResult {
-            let who = ensure_signed(origin)?;
-            let node = Self::name_to_node(&name)?;
-            ensure!(
-                T::RegistryChecker::check_node_useable(node, &who),
-                Error::<T>::InvalidPermission
-            );
-            Accounts::<T>::insert(node, &address, ());
-            Self::deposit_event(Event::<T>::AddressChanged { node, address });
-            Ok(())
-        }
-
         /// Set a DNS record for a domain.
         ///
         /// `name` accepts two forms:
@@ -257,10 +176,10 @@ pub mod pallet {
             content: Content<T>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            // SS58 is managed by the chain (register / transfer / buy); owners cannot
-            // overwrite it via this extrinsic.
+            // SS58 and ORIGIN are managed by the chain and serve as trust anchors;
+            // owners cannot overwrite them via this extrinsic.
             ensure!(
-                record_type != RecordType::SS58,
+                record_type != RecordType::SS58 && record_type != RecordType::ORIGIN,
                 Error::<T>::Ss58RecordProtected
             );
             let node = Self::name_to_node(&name)?;
@@ -301,37 +220,6 @@ pub mod pallet {
             Ok(())
         }
 
-        /// Remove a specific address mapping for a domain.
-        ///
-        /// `name` accepts two forms:
-        /// - `"sub.domain"` — targets the subdomain `sub.domain.<tld>`.
-        /// - `"domain"` (no dot) — targets the top-level domain `domain.<tld>`.
-        ///
-        /// The caller must own (or be an approved operator of) the domain and
-        /// the domain must not be expired.  Unlike `set_text`/`set_record`,
-        /// address entries in `Accounts` have no default value, so a dedicated
-        /// extrinsic is required to delete them.
-        #[pallet::call_index(4)]
-        #[pallet::weight(T::WeightInfo::remove_account())]
-        pub fn remove_account(
-            origin: OriginFor<T>,
-            name: Vec<u8>,
-            address: Address<T::AccountId>,
-        ) -> DispatchResult {
-            let who = ensure_signed(origin)?;
-            let node = Self::name_to_node(&name)?;
-            ensure!(
-                T::RegistryChecker::check_node_useable(node, &who),
-                Error::<T>::InvalidPermission
-            );
-            ensure!(
-                Accounts::<T>::contains_key(node, &address),
-                Error::<T>::AddressNotFound
-            );
-            Accounts::<T>::remove(node, &address);
-            Self::deposit_event(Event::<T>::AddressRemoved { node, address });
-            Ok(())
-        }
     }
 }
 
@@ -343,8 +231,6 @@ use polkadot_sdk::sp_std::vec::Vec;
 pub trait WeightInfo {
     fn set_text(content_len: u32) -> Weight;
     fn set_record(content_len: u32) -> Weight;
-    fn set_account() -> Weight;
-    fn remove_account() -> Weight;
 }
 
 pub trait RegistryChecker {
@@ -358,8 +244,6 @@ pub trait RegistryChecker {
 impl WeightInfo for () {
     fn set_text(_content_len: u32) -> Weight { Weight::zero() }
     fn set_record(_content_len: u32) -> Weight { Weight::zero() }
-    fn set_account() -> Weight { Weight::zero() }
-    fn remove_account() -> Weight { Weight::zero() }
 }
 
 impl<C: Config> Pallet<C> {
@@ -381,7 +265,7 @@ impl<C: Config> Pallet<C> {
         use codec::Encode;
         let bytes = owner.encode();
         let content = pallet::Content::<C>::try_from(bytes)
-            .map_err(|_| pallet::Error::<C>::ParseAddressFailed)?;
+            .map_err(|_| pallet::Error::<C>::InvalidPermission)?;
         pallet::Records::<C>::insert(node, RecordType::SS58, content);
         Ok(())
     }
@@ -393,7 +277,7 @@ impl<C: Config> Pallet<C> {
     /// by the registrar on registration.
     pub fn set_origin_record(node: DomainHash, block_hash: [u8; 32]) -> DispatchResult {
         let content = pallet::Content::<C>::try_from(block_hash.to_vec())
-            .map_err(|_| pallet::Error::<C>::ParseAddressFailed)?;
+            .map_err(|_| pallet::Error::<C>::InvalidPermission)?;
         pallet::Records::<C>::insert(node, RecordType::ORIGIN, content);
         Ok(())
     }
@@ -402,7 +286,7 @@ impl<C: Config> Pallet<C> {
     ///
     /// Called on ownership transfers so the new owner does not inherit stale
     /// DNS data (RPC endpoints, validator stash, parachain IDs, etc.) from
-    /// the previous owner.  `Accounts` and `Texts` are intentionally left
+    /// the previous owner.  `Texts` are intentionally left
     /// untouched — only `Records` entries are cleared here.
     pub fn clear_records_except_ss58(node: DomainHash) {
         let to_remove: Vec<RecordType> = pallet::Records::<C>::iter_prefix(node)
@@ -414,13 +298,12 @@ impl<C: Config> Pallet<C> {
         }
     }
 
-    /// Remove ALL DNS records for `node` (Records, Accounts, and Texts).
+    /// Remove ALL DNS records for `node` (Records and Texts).
     ///
     /// Called when a domain is completely destroyed (e.g. a subname that is
     /// auto-cleared when its parent is transferred, released, or sold).
     pub fn clear_all_records(node: DomainHash) {
         let _ = pallet::Records::<C>::clear_prefix(node, u32::MAX, None);
-        let _ = pallet::Accounts::<C>::clear_prefix(node, u32::MAX, None);
         let _ = pallet::Texts::<C>::clear_prefix(node, u32::MAX, None);
     }
 }

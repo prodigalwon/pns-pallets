@@ -46,11 +46,11 @@ polkadot_sdk::frame_support::construct_runtime!(
 );
 
 impl pns_resolvers::resolvers::Config for Test {
-    type RuntimeEvent = RuntimeEvent;
+    const OFFCHAIN_PREFIX: &'static [u8] = b"pns/";
 
     type WeightInfo = ();
 
-    type AccountIndex = u32;
+    type MaxContentLen = polkadot_sdk::frame_support::traits::ConstU32<1024>;
 
     type RegistryChecker = TestChecker;
 }
@@ -202,8 +202,6 @@ impl crate::registry::Config for Test {
 
     type Registrar = crate::registrar::Pallet<Test>;
 
-    type ResolverId = u32;
-
     type ManagerOrigin = ManagerOrigin;
 
     type Ss58Updater = MockSs58Updater;
@@ -223,8 +221,6 @@ pub type Moment = u64;
 
 impl crate::registrar::Config for Test {
     type RuntimeEvent = RuntimeEvent;
-
-    type ResolverId = u32;
 
     type Registry = crate::registry::Pallet<Test>;
 

@@ -34,7 +34,7 @@ where
 	C: Send + Sync + 'static,
 	C::Api: substrate_frame_rpc_system::AccountNonceApi<Block, AccountId, Nonce>,
 	C::Api: pallet_transaction_payment_rpc::TransactionPaymentRuntimeApi<Block, Balance>,
-	C::Api: pns_runtime_api::PnsStorageApi<Block, u64, Balance, (), AccountId>,
+	C::Api: pns_runtime_api::PnsStorageApi<Block, u64, Balance, AccountId>,
 	C::Api: BlockBuilder<Block>,
 	P: TransactionPool + 'static,
 {

@@ -290,7 +290,7 @@ impl_runtime_apis! {
 		}
 	}
 
-	impl pns_runtime_api::PnsStorageApi<Block, u64, Balance, (), AccountId> for Runtime {
+	impl pns_runtime_api::PnsStorageApi<Block, u64, Balance, AccountId> for Runtime {
 		fn get_info(id: pns_types::DomainHash) -> Option<pns_types::NameRecord<AccountId, u64, Balance>> {
 			use frame_support::traits::Time;
 			let info = pns_registrar::registrar::Pallet::<Runtime>::get_info(id)?;

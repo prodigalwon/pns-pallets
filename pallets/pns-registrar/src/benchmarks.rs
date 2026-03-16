@@ -41,7 +41,7 @@ pub fn poor_account<T: polkadot_sdk::frame_system::Config>(idx: u32) -> T::Accou
 }
 
 mod registry {
-    use super::{account_to_source, get_manager};
+    use super::get_manager;
     #[cfg(test)]
     use crate::mock::Test;
     use crate::{
@@ -91,29 +91,6 @@ mod registry {
             where
             T: crate::origin::Config,
         }
-        approval_for_all_true {
-            let caller = account::<T::AccountId>("caller",0,SEED);
-            let operator = account::<T::AccountId>("operator",1,SEED);
-            let approved = true;
-        }: approval_for_all(RawOrigin::Signed(caller.clone()), account_to_source::<T>(operator.clone()),approved)
-        verify {
-            assert_eq!(crate::registry::OperatorApprovals::<T>::contains_key(caller,operator), approved);
-        }
-        approval_for_all_false {
-            let caller = account::<T::AccountId>("caller",0,SEED);
-            let operator = account::<T::AccountId>("operator",1,SEED);
-            let approved = false;
-            Pallet::<T>::approval_for_all(RawOrigin::Signed(caller.clone()).into(), account_to_source::<T>(operator.clone()),!approved)?;
-        }: approval_for_all(RawOrigin::Signed(caller.clone()), account_to_source::<T>(operator.clone()),approved)
-        verify {
-            assert_eq!(crate::registry::OperatorApprovals::<T>::contains_key(caller,operator), approved);
-        }
-        set_resolver {
-            let (owner,node) = get_account_and_node::<T>("caller",0)?;
-        }: _(RawOrigin::Signed(owner), node,T::ResolverId::default())
-        verify {
-            assert_eq!(crate::registry::Resolver::<T>::get(node), T::ResolverId::default());
-        }
         burn {
             let (owner,node) = get_account_and_node::<T>("caller",3)?;
         }: _(RawOrigin::Signed(owner), node)
@@ -125,21 +102,6 @@ mod registry {
         }: _(RawOrigin::Signed(get_manager::<T>()), official.clone())
         verify {
             assert_eq!(crate::registry::Official::<T>::get(), Some(official));
-        }
-        approve_true {
-            let (owner,node) = get_account_and_node::<T>("owner",567)?;
-            let to = account::<T::AccountId>("to",996,SEED);
-        }: approve(RawOrigin::Signed(owner), to.clone(),node,true)
-        verify {
-            assert!(crate::registry::TokenApprovals::<T>::contains_key(node,to));
-        }
-        approve_false {
-            let (owner,node) = get_account_and_node::<T>("owner",567)?;
-            let to = account::<T::AccountId>("to",996,SEED);
-            crate::registry::Pallet::<T>::approve(RawOrigin::Signed(owner.clone()).into(), to.clone(),node,true)?;
-        }: approve(RawOrigin::Signed(owner), to.clone(),node,false)
-        verify {
-            assert!(!crate::registry::TokenApprovals::<T>::contains_key(node,to));
         }
         impl_benchmark_test_suite!(Pallet, crate::mock::new_test_ext(), Test);
     }

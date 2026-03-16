@@ -2,7 +2,7 @@ use crate::*;
 use codec::Encode;
 use polkadot_sdk::frame_support::{assert_noop, assert_ok};
 use mock::*;
-use pns_resolvers::resolvers::{Address, TextKind};
+use pns_resolvers::resolvers::TextKind;
 use polkadot_sdk::sp_runtime::testing::TestSignature;
 use traits::Label;
 
@@ -59,13 +59,6 @@ fn register_test() {
         assert!(len2 == 11);
         let node = label.encode_with_node(&DOT_BASENODE);
         let node2 = label2.encode_with_node(&DOT_BASENODE);
-
-        assert_ok!(Registry::approve(
-            RuntimeOrigin::signed(RICH_ACCOUNT),
-            9944,
-            node,
-            true
-        ));
 
         let info = registrar::RegistrarInfos::<Test>::get(node).unwrap();
 
@@ -368,16 +361,6 @@ fn resolvers_test() {
             .0
             .encode_with_node(&DOT_BASENODE);
 
-        assert_ok!(Resolvers::set_account(
-            RuntimeOrigin::signed(MONEY_ACCOUNT),
-            node,
-            Address::Id(POOR_ACCOUNT),
-        ));
-        assert_ok!(Resolvers::set_account(
-            RuntimeOrigin::signed(MONEY_ACCOUNT),
-            node,
-            Address::Ethereum([4; 20]),
-        ));
         assert_ok!(Resolvers::set_text(
             RuntimeOrigin::signed(MONEY_ACCOUNT),
             node,
@@ -426,14 +409,6 @@ fn resolvers_test() {
             TextKind::Github,
             b"github homepage".to_vec().into(),
         ));
-        assert_noop!(
-            Resolvers::set_account(
-                RuntimeOrigin::signed(RICH_ACCOUNT),
-                node,
-                Address::Id(POOR_ACCOUNT),
-            ),
-            pns_resolvers::resolvers::Error::<Test>::InvalidPermission
-        );
     })
 }
 

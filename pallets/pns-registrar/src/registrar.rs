@@ -54,8 +54,6 @@ pub mod pallet {
     #[pallet::config]
     pub trait Config: polkadot_sdk::frame_system::Config {
 
-        type ResolverId: Parameter + Default;
-
         type Registry: Registry<AccountId = Self::AccountId, Balance = BalanceOf<Self>>;
 
         type Currency: Currency<Self::AccountId>;

@@ -59,7 +59,7 @@ impl<C> PnsRpc<C> {
 impl<C> PnsStorageApiServer for PnsRpc<C>
 where
     C: ProvideRuntimeApi<Block> + HeaderBackend<Block> + Send + Sync + 'static,
-    C::Api: pns_runtime_api::PnsStorageApi<Block, u64, Balance, (), AccountId>,
+    C::Api: pns_runtime_api::PnsStorageApi<Block, u64, Balance, AccountId>,
 {
     fn get_info(&self, node: DomainHash) -> RpcResult<Option<NameRecord<AccountId, u64, Balance>>> {
         let chain = self.client.info();
@@ -70,7 +70,7 @@ where
                 "Runtime error",
                 Some(format!("{:?}", e)),
             ))
-            .map(|opt| opt.map(|mut r| {
+            .map(|opt: Option<NameRecord<AccountId, u64, Balance>>| opt.map(|mut r| {
                 r.read_block_hash = chain.best_hash;
                 r.read_block_number = chain.best_number;
                 r
@@ -86,7 +86,7 @@ where
                 "Runtime error",
                 Some(format!("{:?}", e)),
             ))
-            .map(|opt| opt.map(|mut r| {
+            .map(|opt: Option<NameRecord<AccountId, u64, Balance>>| opt.map(|mut r| {
                 r.read_block_hash = chain.best_hash;
                 r.read_block_number = chain.best_number;
                 r
@@ -116,7 +116,7 @@ where
                 "Runtime error",
                 Some(format!("{:?}", e)),
             ))
-            .map(|opt| opt.map(|mut r| {
+            .map(|opt: Option<ListingInfo<AccountId, Balance, u64>>| opt.map(|mut r| {
                 r.read_block_hash = chain.best_hash;
                 r.read_block_number = chain.best_number;
                 r

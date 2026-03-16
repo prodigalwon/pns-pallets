@@ -7,11 +7,10 @@ use polkadot_sdk::sp_runtime::traits::MaybeSerialize;
 use codec::{Decode, Encode};
 
 polkadot_sdk::sp_api::decl_runtime_apis! {
-    pub trait PnsStorageApi<Duration, Balance, Signature, AccountId>
+    pub trait PnsStorageApi<Duration, Balance, AccountId>
     where
         Duration: Decode + Encode + MaybeSerialize,
         Balance: Decode + Encode + MaybeSerialize,
-        Signature: Decode + Encode + MaybeSerialize,
         AccountId: Decode + Encode + MaybeSerialize,
     {
         fn get_info(id: DomainHash) -> Option<NameRecord<AccountId, Duration, Balance>>;

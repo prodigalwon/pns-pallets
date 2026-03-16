@@ -81,7 +81,6 @@ where
         Block,
         Config::Moment,
         BalanceOf<Config>,
-        Config::Signature,
         Config::AccountId,
     >,
     Client::Api: BlockBuilder<Block>,

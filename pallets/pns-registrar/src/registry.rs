@@ -12,11 +12,8 @@
 //!
 //! ### Module functions
 //!
-//! - `approval_for_all` - share the permissions of all your domains to other accounts
-//! - `set_resolver` - set the resolver address of a domain name, which requires permission to operate that domain
 //! - `burn` - destroy a domain name, requires the domain's operational privileges
 //! - `set_official` - Set official account, needs manager privileges
-//! - `approve` - share the permission of a domain to another account, requires the permission of the domain
 use polkadot_sdk::sp_weights::Weight;
 
 pub use pallet::*;
@@ -31,7 +28,7 @@ pub mod pallet {
     use polkadot_sdk::frame_support::traits::EnsureOrigin;
     use polkadot_sdk::frame_system::{ensure_signed, pallet_prelude::*};
     use pns_types::{DomainHash, DomainTracing, Record};
-    use polkadot_sdk::sp_runtime::traits::{StaticLookup, Zero};
+    use polkadot_sdk::sp_runtime::traits::Zero;
     use polkadot_sdk::sp_std::vec::Vec;
 
     #[pallet::config]
@@ -43,8 +40,6 @@ pub mod pallet {
         type WeightInfo: WeightInfo;
 
         type Registrar: Registrar<AccountId = Self::AccountId>;
-
-        type ResolverId: Parameter + Default + MaxEncodedLen;
 
         type ManagerOrigin: EnsureOrigin<Self::RuntimeOrigin, Success = Self::AccountId>;
 
@@ -94,30 +89,14 @@ pub mod pallet {
     pub type OfferedToAccount<T: Config> =
         StorageDoubleMap<_, Twox64Concat, T::AccountId, Twox64Concat, DomainHash, ()>;
 
-    /// `name_hash` -> `resolver_id`
-    #[pallet::storage]
-    pub type Resolver<T: Config> =
-        StorageMap<_, Twox64Concat, DomainHash, T::ResolverId, ValueQuery>;
     /// `official`
     #[pallet::storage]
     pub type Official<T: Config> = StorageValue<_, T::AccountId>;
-
-    /// (`owner`,`account`) if `account` is `operater` -> ()
-    #[pallet::storage]
-    pub type OperatorApprovals<T: Config> =
-        StorageDoubleMap<_, Twox64Concat, T::AccountId, Twox64Concat, T::AccountId, (), ValueQuery>;
-
-    /// (`node`,`account`) `node` -> `account`
-    #[pallet::storage]
-    pub type TokenApprovals<T: Config> =
-        StorageDoubleMap<_, Twox64Concat, DomainHash, Twox64Concat, T::AccountId, (), ValueQuery>;
 
     #[pallet::genesis_config]
     pub struct GenesisConfig<T: Config> {
         pub origin: Vec<(DomainHash, DomainTracing)>,
         pub official: Option<T::AccountId>,
-        pub operators: Vec<(T::AccountId, T::AccountId)>,
-        pub token_approvals: Vec<(DomainHash, T::AccountId)>,
     }
 
     impl<T: Config> Default for GenesisConfig<T> {
@@ -125,8 +104,6 @@ pub mod pallet {
             GenesisConfig {
                 origin: Vec::with_capacity(0),
                 official: None,
-                operators: Vec::with_capacity(0),
-                token_approvals: Vec::with_capacity(0),
             }
         }
     }
@@ -140,29 +117,12 @@ pub mod pallet {
             if let Some(official) = &self.official {
                 Official::<T>::put(official);
             }
-            for (owner, operator) in self.operators.iter() {
-                OperatorApprovals::<T>::insert(owner, operator, ());
-            }
-            for (hash, to) in self.token_approvals.iter() {
-                TokenApprovals::<T>::insert(hash, to, ());
-            }
         }
     }
 
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
-        /// Logged when the resolver for a node changes.
-        NewResolver {
-            node: DomainHash,
-            resolver: T::ResolverId,
-        },
-        /// Logged when an operator is added or removed.
-        ApprovalForAll {
-            owner: T::AccountId,
-            operator: T::AccountId,
-            approved: bool,
-        },
         /// Logged when a node is traded.
         Transferred {
             from: T::AccountId,
@@ -199,8 +159,6 @@ pub mod pallet {
         SubnodeNotClear,
         /// You may be burning a root node or an unknown node?
         BanBurnBaseNode,
-        /// ERC721: approval to current owner
-        ApprovalFailure,
         /// Pns official account is not initialized, please feedback to the official.
         OfficialNotInitiated,
         /// The name string you provided is invalid (illegal characters or wrong length).
@@ -253,15 +211,10 @@ pub mod pallet {
         #[inline]
         pub fn verify_with_owner(
             caller: &T::AccountId,
-            node: DomainHash,
+            _node: DomainHash,
             owner: &T::AccountId,
         ) -> DispatchResult {
-            ensure!(
-                caller == owner
-                    || OperatorApprovals::<T>::contains_key(owner, caller)
-                    || TokenApprovals::<T>::contains_key(node, caller),
-                Error::<T>::NoPermission
-            );
+            ensure!(caller == owner, Error::<T>::NoPermission);
 
             Ok(())
         }
@@ -293,8 +246,14 @@ pub mod pallet {
                     // Auto-clear all subnames so callers don't need to do it manually.
                     Self::clear_subnames(token);
                     T::Registrar::clear_registrar_info(token, &token_owner)?;
+                    // Canonical names are inserted into AccountToSubnames at mint time;
+                    // remove that entry so the former owner can register again.
+                    AccountToSubnames::<T>::remove(&token_owner, token);
                 }
             }
+
+            // Remove domain-keyed metadata that would otherwise leak after burn.
+            RuntimeOrigin::<T>::remove(token);
 
             // Clear all DNS records for the node itself (SS58, ORIGIN, etc.).
             T::RecordCleaner::clear_all_records(token);
@@ -517,8 +476,7 @@ pub mod pallet {
         /// For each child:
         /// - All DNS records (Records, Accounts, Texts) are wiped.
         /// - The NFT is burned (removes from Tokens and TokensByOwner).
-        /// - The RuntimeOrigin and Resolver entries are removed.
-        /// - Token approvals for the child are cleared.
+        /// - The RuntimeOrigin entry is removed.
         ///
         /// After all children are removed the SubNames prefix is cleared and
         /// the root's children counter is reset to zero.
@@ -531,8 +489,6 @@ pub mod pallet {
             for child in children {
                 T::RecordCleaner::clear_all_records(child);
                 RuntimeOrigin::<T>::remove(child);
-                Resolver::<T>::remove(child);
-                let _ = TokenApprovals::<T>::clear_prefix(child, u32::MAX, None);
                 // Clear new-style SubnameRecord delegation.
                 if let Some(record) = SubnameRecords::<T>::take(child) {
                     match record.state {
@@ -558,67 +514,8 @@ pub mod pallet {
             });
         }
     }
-    // 可直接使用不需要考虑权限问题的方法
-    impl<T: Config> Pallet<T> {
-        #[inline(always)]
-        fn do_set_approval_for_all(caller: T::AccountId, operator: T::AccountId, approved: bool) {
-            OperatorApprovals::<T>::mutate_exists(&caller, &operator, |flag| {
-                if approved {
-                    flag.replace(())
-                } else {
-                    flag.take()
-                }
-            });
-            Self::deposit_event(Event::ApprovalForAll {
-                owner: caller,
-                operator,
-                approved,
-            });
-        }
-        // 给Rpc调用
-        // #[inline(always)]
-        // pub fn get_operators(caller: T::AccountId) -> Vec<T::AccountId> {
-        //     OperatorApprovals::<T>::iter_prefix(caller)
-        //         .map(|(operator, _)| operator)
-        //         .collect()
-        // }
-    }
     #[pallet::call]
     impl<T: Config> Pallet<T> {
-        /// Share your account permissions with another operator account.
-        #[pallet::call_index(0)]
-        #[pallet::weight(T::WeightInfo::approval_for_all(*approved))]
-        pub fn approval_for_all(
-            origin: OriginFor<T>,
-            operator: <T::Lookup as StaticLookup>::Source,
-            approved: bool,
-        ) -> DispatchResult {
-            let caller = ensure_signed(origin)?;
-            let operator = T::Lookup::lookup(operator)?;
-
-            Self::do_set_approval_for_all(caller, operator, approved);
-            Ok(())
-        }
-        /// Set the resolver address for a domain.
-        ///
-        /// `name` accepts two forms:
-        /// - `"sub.domain"` — targets the subdomain `sub.domain.<tld>`.
-        /// - `"domain"` (no dot) — targets the top-level domain `domain.<tld>`.
-        #[pallet::call_index(1)]
-        #[pallet::weight(T::WeightInfo::set_resolver())]
-        pub fn set_resolver(
-            origin: OriginFor<T>,
-            name: Vec<u8>,
-            resolver: T::ResolverId,
-        ) -> DispatchResult {
-            let caller = ensure_signed(origin)?;
-            let node = Self::name_to_node(&name)?;
-            Self::verify(&caller, node)?;
-            Resolver::<T>::mutate(node, |rs| *rs = resolver.clone());
-
-            Self::deposit_event(Event::<T>::NewResolver { node, resolver });
-            Ok(())
-        }
         /// Burn a domain node.
         ///
         /// `name` accepts two forms:
@@ -660,38 +557,6 @@ pub mod pallet {
 
             Ok(())
         }
-        /// Grant or revoke per-token approval for a specific domain.
-        ///
-        /// `name` accepts two forms:
-        /// - `"sub.domain"` — targets the subdomain `sub.domain.<tld>`.
-        /// - `"domain"` (no dot) — targets the top-level domain `domain.<tld>`.
-        #[pallet::call_index(4)]
-        #[pallet::weight(T::WeightInfo::approve(*approved))]
-        pub fn approve(
-            origin: OriginFor<T>,
-            to: T::AccountId,
-            name: Vec<u8>,
-            approved: bool,
-        ) -> DispatchResult {
-            let sender = ensure_signed(origin)?;
-            let node = Self::name_to_node(&name)?;
-
-            let owner = nft::Pallet::<T>::tokens(T::ClassId::zero(), node)
-                .ok_or(Error::<T>::NotExist)?
-                .owner;
-
-            ensure!(to != owner, Error::<T>::ApprovalFailure);
-
-            Self::verify_with_owner(&sender, node, &owner)?;
-
-            if approved {
-                TokenApprovals::<T>::insert(node, to, ());
-            } else {
-                TokenApprovals::<T>::remove(node, to);
-            }
-
-            Ok(())
-        }
     }
 }
 
@@ -702,27 +567,8 @@ use polkadot_sdk::frame_support::{
 };
 use pns_types::DomainHash;
 pub trait WeightInfo {
-    fn approval_for_all(approved: bool) -> Weight {
-        if approved {
-            Self::approval_for_all_true()
-        } else {
-            Self::approval_for_all_false()
-        }
-    }
-    fn approval_for_all_true() -> Weight;
-    fn approval_for_all_false() -> Weight;
-    fn set_resolver() -> Weight;
     fn burn() -> Weight;
     fn set_official() -> Weight;
-    fn approve(approved: bool) -> Weight {
-        if approved {
-            Self::approve_true()
-        } else {
-            Self::approve_false()
-        }
-    }
-    fn approve_true() -> Weight;
-    fn approve_false() -> Weight;
 }
 // TODO: replace litentry
 impl<T: pallet::Config> crate::traits::NFT<T::AccountId> for pallet::Pallet<T> {
@@ -942,31 +788,11 @@ impl<T: Config> crate::traits::Official for pallet::Pallet<T> {
 }
 
 impl WeightInfo for () {
-    fn approval_for_all_true() -> Weight {
-        Weight::zero()
-    }
-
-    fn approval_for_all_false() -> Weight {
-        Weight::zero()
-    }
-
-    fn set_resolver() -> Weight {
-        Weight::zero()
-    }
-
     fn burn() -> Weight {
         Weight::zero()
     }
 
     fn set_official() -> Weight {
-        Weight::zero()
-    }
-
-    fn approve_true() -> Weight {
-        Weight::zero()
-    }
-
-    fn approve_false() -> Weight {
         Weight::zero()
     }
 }
