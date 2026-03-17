@@ -293,6 +293,10 @@ impl_runtime_apis! {
 	impl pns_runtime_api::PnsStorageApi<Block, u64, Balance, AccountId> for Runtime {
 		fn get_info(id: pns_types::DomainHash) -> Option<pns_types::NameRecord<AccountId, u64, Balance>> {
 			use frame_support::traits::Time;
+			// Names in offered state are not yet active — return null until the recipient accepts.
+			if pns_registrar::registrar::OfferedNames::<Runtime>::contains_key(id) {
+				return None;
+			}
 			let info = pns_registrar::registrar::Pallet::<Runtime>::get_info(id)?;
 			// Expired registrations resolve to None — the name is up for grabs.
 			if pallet_timestamp::Pallet::<Runtime>::now() >= info.expire {
@@ -340,6 +344,10 @@ impl_runtime_apis! {
 			let (label, _) = Label::new_with_len(&name)?;
 			let base_node = pns_types::NATIVE_BASENODE;
 			let node = label.encode_with_node(&base_node);
+			// Names in offered state are not yet active — return null until the recipient accepts.
+			if pns_registrar::registrar::OfferedNames::<Runtime>::contains_key(node) {
+				return None;
+			}
 			let info = pns_registrar::registrar::Pallet::<Runtime>::get_info(node)?;
 			// Expired registrations resolve to None — the name is up for grabs.
 			if pallet_timestamp::Pallet::<Runtime>::now() >= info.expire {
@@ -380,6 +388,13 @@ impl_runtime_apis! {
 		fn pending_offers_for(account: AccountId) -> Vec<pns_types::DomainHash> {
 			pns_registrar::registry::OfferedToAccount::<Runtime>::iter_prefix(&account)
 				.map(|(hash, _)| hash)
+				.collect()
+		}
+		fn pending_name_offers_for(account: AccountId) -> Vec<pns_types::DomainHash> {
+			pns_registrar::registrar::OfferedNames::<Runtime>::iter()
+				.filter_map(|(node, record)| {
+					if record.recipient == account { Some(node) } else { None }
+				})
 				.collect()
 		}
 	}

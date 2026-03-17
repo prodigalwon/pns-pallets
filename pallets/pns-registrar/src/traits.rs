@@ -91,6 +91,16 @@ pub trait Registry: NFT<Self::AccountId> {
         label_node: DomainHash,
         by: &Self::AccountId,
     ) -> Result<pns_types::DomainHash, polkadot_sdk::sp_runtime::DispatchError>;
+
+    /// Fully delete a pending subdomain offer where `target` is the intended recipient.
+    ///
+    /// Unlike `reject_subname_offer` (which changes state to Rejected), this removes
+    /// the record entirely — used by the `register` extrinsic's `reject_offer` path so
+    /// the recipient can free the slot in a single transaction.
+    fn revoke_pending_offer_for_target(
+        label_node: DomainHash,
+        target: &Self::AccountId,
+    ) -> DispatchResult;
 }
 
 /// Interface for the marketplace pallet to interact with name ownership.
@@ -102,6 +112,17 @@ pub trait NameRegistry {
     fn owner_of(node: DomainHash) -> Option<Self::AccountId>;
     /// Transfers `node` from `from` to `to`, clearing the seller's canonical name entry.
     fn transfer_name(from: &Self::AccountId, to: &Self::AccountId, node: DomainHash) -> DispatchResult;
+    /// Purchase a name as a gift for `recipient`.
+    ///
+    /// Transfers the NFT from `seller` to `recipient` and records the pending offer so
+    /// that DNS lookups return null until the recipient calls `accept_offered_name`.
+    /// `buyer` is the account that funded the purchase (recorded for audit purposes).
+    fn offer_bought_name(
+        seller: &Self::AccountId,
+        buyer: &Self::AccountId,
+        recipient: &Self::AccountId,
+        node: DomainHash,
+    ) -> DispatchResult;
 }
 
 // 客户

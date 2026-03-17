@@ -95,6 +95,26 @@ fn testnet_genesis(
 		pns_registrar: pns_registrar::registrar::GenesisConfig {
 			infos: Default::default(),
 			reserved_list: Default::default(),
+			// Names reserved at the request of the Polkadot Technical Fellowship.
+			// These labels can never be registered by end users.
+			// To add more after genesis, use the `add_reserved` extrinsic (manager-only).
+			reserved_names: vec![
+				b"polkadot".to_vec(),
+				b"kusama".to_vec(),
+				b"paseo".to_vec(),
+				b"westend".to_vec(),
+				b"fellowship".to_vec(),
+				b"hub".to_vec(),
+				b"polkadothub".to_vec(),
+				b"assethub".to_vec(),
+				b"collectives".to_vec(),
+				b"pusd".to_vec(),
+				b"pop".to_vec(),
+				b"revive".to_vec(),
+				b"jam".to_vec(),
+				b"people".to_vec(),
+				b"dap".to_vec(),
+			],
 		},
 	})
 }

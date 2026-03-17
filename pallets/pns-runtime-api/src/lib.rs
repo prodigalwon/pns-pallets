@@ -41,5 +41,8 @@ polkadot_sdk::sp_api::decl_runtime_apis! {
         fn get_subname(node: DomainHash) -> Option<pns_types::SubnameRecord<AccountId>>;
         /// Return all subname hashes for which `account` has a pending offer (state = Offered).
         fn pending_offers_for(account: AccountId) -> polkadot_sdk::sp_std::vec::Vec<DomainHash>;
+        /// Return all top-level name hashes that were purchased as gifts for `account`
+        /// and are awaiting acceptance (recorded in the registrar's OfferedNames storage).
+        fn pending_name_offers_for(account: AccountId) -> polkadot_sdk::sp_std::vec::Vec<DomainHash>;
     }
 }

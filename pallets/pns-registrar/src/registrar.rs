@@ -120,12 +120,27 @@ pub mod pallet {
     pub type OwnerToPrimaryName<T: Config> =
         StorageMap<_, Blake2_128Concat, T::AccountId, DomainHash>;
 
+    /// `name_hash` → OfferedNameRecord — top-level names purchased as gifts, pending acceptance.
+    ///
+    /// While this entry exists, DNS lookups for the name return `null`.
+    /// Cleared when the recipient calls `accept_offered_name` or rejects via `register`.
+    #[pallet::storage]
+    pub type OfferedNames<T: Config> =
+        StorageMap<_, Blake2_128Concat, DomainHash, pns_types::OfferedNameRecord<T::AccountId>>;
+
     pub type RegistrarInfoOf<T> = RegistrarInfo<<T as Config>::Moment, BalanceOf<T>>;
 
     #[pallet::genesis_config]
     pub struct GenesisConfig<T: Config> {
         pub infos: Vec<(DomainHash, RegistrarInfoOf<T>)>,
+        /// Pre-computed namehashes to reserve. Use `reserved_names` for human-readable names instead.
         pub reserved_list: polkadot_sdk::sp_std::collections::btree_set::BTreeSet<DomainHash>,
+        /// Plain-text labels (e.g. b"polkadot") to reserve at genesis.
+        /// Each is hashed against the runtime's BaseNode at build time.
+        /// Invalid or unrecognised labels are silently skipped.
+        /// The `add_reserved` / `remove_reserved` extrinsics can extend or shrink
+        /// the reserved set at any time after genesis.
+        pub reserved_names: polkadot_sdk::sp_std::vec::Vec<polkadot_sdk::sp_std::vec::Vec<u8>>,
     }
 
     impl<T: Config> Default for GenesisConfig<T> {
@@ -133,6 +148,7 @@ pub mod pallet {
             GenesisConfig {
                 infos: Vec::with_capacity(0),
                 reserved_list: polkadot_sdk::sp_std::collections::btree_set::BTreeSet::new(),
+                reserved_names: polkadot_sdk::sp_std::vec::Vec::new(),
             }
         }
     }
@@ -144,8 +160,17 @@ pub mod pallet {
                 RegistrarInfos::<T>::insert(node, info);
             }
 
+            // Raw namehash entries (e.g. from an older chainspec or programmatic use).
             for node in self.reserved_list.iter() {
                 ReservedList::<T>::insert(node, ());
+            }
+
+            // Human-readable labels resolved at genesis time.
+            let base_node = T::BaseNode::get();
+            for name in self.reserved_names.iter() {
+                if let Some(node) = pns_types::parse_name_to_node(name, &base_node) {
+                    ReservedList::<T>::insert(node, ());
+                }
             }
         }
     }
@@ -195,6 +220,22 @@ pub mod pallet {
         NameReserved { node: DomainHash },
         /// Cancel a reserved domain name.
         NameUnReserved { node: DomainHash },
+        /// A top-level name was purchased as a gift and is awaiting acceptance by the recipient.
+        NameBoughtForRecipient {
+            node: DomainHash,
+            buyer: T::AccountId,
+            recipient: T::AccountId,
+        },
+        /// The recipient accepted a name that was gifted to them.
+        OfferedNameAccepted {
+            node: DomainHash,
+            recipient: T::AccountId,
+        },
+        /// A pending offered name was rejected by the recipient.
+        OfferedNameRejected {
+            node: DomainHash,
+            by: T::AccountId,
+        },
     }
 
     #[pallet::error]
@@ -232,6 +273,12 @@ pub mod pallet {
         NoCanonicalName,
         /// Subdomain label could not be converted to a bounded vector (too long).
         LabelTooLong,
+        /// This name is already in the offered state (purchased as a gift, pending acceptance).
+        NameAlreadyOffered,
+        /// No offered name record found for this name.
+        OfferedNameNotFound,
+        /// Caller is not the intended recipient of this name offer.
+        NotOfferedNameRecipient,
     }
 
     #[pallet::call]
@@ -283,9 +330,34 @@ pub mod pallet {
             origin: OriginFor<T>,
             name: Vec<u8>,
             owner: <T::Lookup as StaticLookup>::Source,
+            /// Optional: reject a pending offered name (top-level or subdomain) before registering.
+            /// Pass the plain label (e.g. `b"bob"` or `b"sub.parent"`) of the name to reject.
+            /// The caller must be the intended recipient of the offer.
+            /// For top-level offered names the NFT is burned (non-refundable).
+            /// For subdomain offers the record is fully revoked.
+            reject_offer: Option<Vec<u8>>,
         ) -> DispatchResult {
             let caller = ensure_signed(origin)?;
             let owner = T::Lookup::lookup(owner)?;
+
+            // Reject a pending offered name before registering, if requested.
+            if let Some(ref reject_name) = reject_offer {
+                let rej_node = pns_types::parse_name_to_node(reject_name, &T::BaseNode::get())
+                    .ok_or(Error::<T>::ParseLabelFailed)?;
+
+                if let Some(offer) = OfferedNames::<T>::take(rej_node) {
+                    // Top-level name offered via marketplace gift purchase.
+                    ensure!(offer.recipient == caller, Error::<T>::NotOfferedNameRecipient);
+                    // The recipient currently holds the NFT — burn it, freeing the slot.
+                    T::Registry::burn(caller.clone(), rej_node)?;
+                    Self::deposit_event(Event::<T>::OfferedNameRejected { node: rej_node, by: caller.clone() });
+                } else {
+                    // Try as a subdomain offer addressed to the caller.
+                    T::Registry::revoke_pending_offer_for_target(rej_node, &caller)
+                        .map_err(|_| Error::<T>::OfferedNameNotFound)?;
+                    Self::deposit_event(Event::<T>::OfferedNameRejected { node: rej_node, by: caller.clone() });
+                }
+            }
 
             ensure!(!name.is_empty(), Error::<T>::LabelInvalid);
             ensure!(T::IsOpen::is_open(), Error::<T>::RegistrarClosed);
@@ -661,6 +733,57 @@ pub mod pallet {
 
         /// Release an active subdomain voluntarily.
         ///
+        /// Accept a top-level name that was purchased as a gift for the caller.
+        ///
+        /// Callable only by the account designated as `recipient` when the name was bought.
+        /// Sets the caller as the canonical name owner, writes SS58 and ORIGIN records,
+        /// and removes the offered state so lookups begin resolving normally.
+        ///
+        /// The caller must not already hold a valid canonical name or an active subdomain.
+        #[pallet::call_index(11)]
+        #[pallet::weight(T::WeightInfo::accept_offered_name())]
+        #[polkadot_sdk::frame_support::transactional]
+        pub fn accept_offered_name(origin: OriginFor<T>, name: Vec<u8>) -> DispatchResult {
+            let caller = ensure_signed(origin)?;
+
+            let (label, _) = Label::new_with_len(&name).ok_or(Error::<T>::ParseLabelFailed)?;
+            let node = label.encode_with_node(&T::BaseNode::get());
+
+            let offer = OfferedNames::<T>::take(node).ok_or(Error::<T>::OfferedNameNotFound)?;
+            ensure!(offer.recipient == caller, Error::<T>::NotOfferedNameRecipient);
+
+            // The RegistrarInfo must still be valid.
+            let now = T::NowProvider::now();
+            let info = RegistrarInfos::<T>::get(node).ok_or(Error::<T>::NotExistOrOccupied)?;
+            ensure!(now < info.expire, Error::<T>::NotUseable);
+
+            // Caller must not already hold another canonical name.
+            if let Some(existing_node) = OwnerToPrimaryName::<T>::get(&caller) {
+                let still_valid = RegistrarInfos::<T>::get(existing_node)
+                    .map(|i| now <= i.expire + T::GracePeriod::get())
+                    .unwrap_or(false);
+                if still_valid {
+                    return Err(Error::<T>::AlreadyHasCanonicalName.into());
+                }
+                OwnerToPrimaryName::<T>::remove(&caller);
+            }
+            ensure!(!T::Registry::has_active_subname(&caller), Error::<T>::AlreadyHoldsSubdomain);
+
+            // Activate the name for the recipient.
+            OwnerToPrimaryName::<T>::insert(&caller, node);
+            T::Ss58Updater::update_ss58(node, &caller)?;
+            let parent_hash: [u8; 32] = polkadot_sdk::frame_system::Pallet::<T>::parent_hash()
+                .as_ref()
+                .try_into()
+                .unwrap_or([0u8; 32]);
+            T::OriginRecorder::record_origin(node, parent_hash)?;
+
+            Self::deposit_event(Event::<T>::OfferedNameAccepted { node, recipient: caller });
+            Ok(())
+        }
+
+        /// Release an active subdomain voluntarily.
+        ///
         /// Callable only by the current holder (the account that accepted the offer).
         /// Deletes the SubnameRecord and decrements the parent's children counter.
         #[pallet::call_index(10)]
@@ -711,6 +834,7 @@ pub trait WeightInfo {
     fn reject_subdomain() -> Weight;
     fn revoke_subdomain() -> Weight;
     fn release_subdomain() -> Weight;
+    fn accept_offered_name() -> Weight;
     fn register(len: u32) -> Weight;
     fn renew() -> Weight;
     fn transfer() -> Weight;
@@ -880,6 +1004,7 @@ impl WeightInfo for () {
     fn reject_subdomain() -> Weight { Weight::zero() }
     fn revoke_subdomain() -> Weight { Weight::zero() }
     fn release_subdomain() -> Weight { Weight::zero() }
+    fn accept_offered_name() -> Weight { Weight::zero() }
 
     fn register(_len: u32) -> Weight {
         Weight::zero()
@@ -946,6 +1071,62 @@ impl<T: Config> crate::traits::NameRegistry for Pallet<T> {
             OwnerToPrimaryName::<T>::remove(from);
         }
         OwnerToPrimaryName::<T>::insert(to, node);
+        Ok(())
+    }
+
+    fn offer_bought_name(
+        seller: &T::AccountId,
+        buyer: &T::AccountId,
+        recipient: &T::AccountId,
+        node: DomainHash,
+    ) -> polkadot_sdk::sp_runtime::DispatchResult {
+        // The name must not already be in offered state.
+        polkadot_sdk::frame_support::ensure!(
+            !OfferedNames::<T>::contains_key(node),
+            Error::<T>::NameAlreadyOffered
+        );
+        // The recipient must not already hold any name.
+        if let Some(existing) = OwnerToPrimaryName::<T>::get(recipient) {
+            let now = T::NowProvider::now();
+            let still_valid = RegistrarInfos::<T>::get(existing)
+                .map(|info| now <= info.expire + T::GracePeriod::get())
+                .unwrap_or(false);
+            polkadot_sdk::frame_support::ensure!(
+                !still_valid,
+                Error::<T>::AlreadyHasCanonicalName
+            );
+        }
+        polkadot_sdk::frame_support::ensure!(
+            !T::Registry::has_active_subname(recipient),
+            Error::<T>::AlreadyHoldsSubdomain
+        );
+
+        // Transfer the NFT from seller to recipient.
+        // do_transfer clears seller's subnames/DNS records and writes SS58/ORIGIN for recipient.
+        // These will be overwritten when the recipient calls accept_offered_name.
+        T::Registry::transfer(seller, recipient, node)?;
+
+        // Remove the seller's canonical name entry.
+        if OwnerToPrimaryName::<T>::get(seller) == Some(node) {
+            OwnerToPrimaryName::<T>::remove(seller);
+        }
+        // Do NOT set recipient's OwnerToPrimaryName — that happens on acceptance.
+
+        // Record the pending offer.
+        OfferedNames::<T>::insert(
+            node,
+            pns_types::OfferedNameRecord {
+                buyer: buyer.clone(),
+                recipient: recipient.clone(),
+            },
+        );
+
+        Self::deposit_event(Event::<T>::NameBoughtForRecipient {
+            node,
+            buyer: buyer.clone(),
+            recipient: recipient.clone(),
+        });
+
         Ok(())
     }
 }

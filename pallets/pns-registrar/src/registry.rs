@@ -777,6 +777,22 @@ impl<T: pallet::Config> crate::traits::Registry for pallet::Pallet<T> {
         T::RecordCleaner::clear_all_records(label_node);
         Ok(record.parent)
     }
+
+    fn revoke_pending_offer_for_target(
+        label_node: DomainHash,
+        target: &Self::AccountId,
+    ) -> DispatchResult {
+        let record = pallet::SubnameRecords::<T>::get(label_node)
+            .ok_or(pallet::Error::<T>::SubnameNotFound)?;
+        ensure!(
+            record.state == pns_types::SubnameState::Offered,
+            pallet::Error::<T>::SubnameNotOffered
+        );
+        ensure!(record.target == *target, pallet::Error::<T>::NotSubnameTarget);
+        // Delegate full cleanup to revoke_subname (removes record, SubNames entry,
+        // OfferedToAccount entry, and decrements the parent's children counter).
+        Self::revoke_subname(record.parent, label_node)
+    }
 }
 
 impl<T: Config> crate::traits::Official for pallet::Pallet<T> {

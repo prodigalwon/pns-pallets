@@ -104,6 +104,20 @@ pub struct SubnameRecord<AccountId> {
     pub state: SubnameState,
 }
 
+/// A top-level name purchased via the marketplace as a gift for a recipient.
+///
+/// The name is in a "pending" state while this record exists: DNS lookups return
+/// `null` for the name until the recipient calls `accept_offered_name`.
+/// If the recipient calls `register` with `reject_offer` pointing to this name,
+/// the NFT is burned and the registration slot is freed.
+#[derive(Serialize, Deserialize, Encode, Decode, PartialEq, Eq, Clone, TypeInfo, MaxEncodedLen, Debug)]
+pub struct OfferedNameRecord<AccountId> {
+    /// The account that purchased the name and funded the transaction.
+    pub buyer: AccountId,
+    /// The intended recipient who must accept or reject the name.
+    pub recipient: AccountId,
+}
+
 pub type DomainHash = sp_core::H256;
 
 /// Namehash of "dot" — the Polkadot TLD base node.

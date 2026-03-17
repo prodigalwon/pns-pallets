@@ -107,6 +107,15 @@ pub mod pallet {
             price: BalanceOf<T>,
             fee: BalanceOf<T>,
         },
+        /// A name was purchased as a gift for `recipient` and is awaiting their acceptance.
+        NameBoughtForRecipient {
+            node: DomainHash,
+            seller: T::AccountId,
+            buyer: T::AccountId,
+            recipient: T::AccountId,
+            price: BalanceOf<T>,
+            fee: BalanceOf<T>,
+        },
     }
 
     #[pallet::error]
@@ -127,6 +136,10 @@ pub mod pallet {
         InvalidName,
         /// The buyer and the seller cannot be the same account.
         BuyerIsSeller,
+        /// The buyer cannot also be the intended gift recipient.
+        BuyerIsRecipient,
+        /// The seller cannot be the gift recipient (no self-gifting).
+        SellerIsRecipient,
     }
 
     #[pallet::call]
@@ -170,10 +183,15 @@ pub mod pallet {
         /// Purchase a listed name. The buyer passes the plain DNS label (e.g. `b"alice"`);
         /// the pallet resolves it to the namehash internally. The buyer pays `listing.price`;
         /// the protocol fee is burned from the seller's proceeds; the name NFT is transferred atomically.
+        ///
+        /// Pass `recipient = Some(account)` to buy the name as a gift for someone else.
+        /// The name enters an "offered" state — lookups return null — until the recipient
+        /// calls `accept_offered_name` on the registrar pallet. The recipient must not
+        /// already hold a canonical name or an active subdomain.
         #[pallet::call_index(2)]
         #[pallet::weight(T::WeightInfo::buy_name())]
         #[polkadot_sdk::frame_support::transactional]
-        pub fn buy_name(origin: OriginFor<T>, name: Vec<u8>) -> DispatchResult {
+        pub fn buy_name(origin: OriginFor<T>, name: Vec<u8>, recipient: Option<T::AccountId>) -> DispatchResult {
             let buyer = ensure_signed(origin)?;
             let label = Label::new(&name).ok_or(Error::<T>::InvalidName)?;
             let node = label.encode_with_node(&T::BaseNode::get());
@@ -205,26 +223,44 @@ pub mod pallet {
             )?;
             drop(imbalance); // burned
 
-            // Transfer the name NFT and update canonical name tracking.
-            T::NameRegistry::transfer_name(&listing.seller, &buyer, node)?;
-
-            // Clear stale DNS records from the seller, then write the buyer's SS58 and ORIGIN.
-            T::RecordCleaner::clear_records_except_ss58(node);
-            T::Ss58Updater::update_ss58(node, &buyer)?;
-            let parent_hash: [u8; 32] = polkadot_sdk::frame_system::Pallet::<T>::parent_hash()
-                .as_ref()
-                .try_into()
-                .unwrap_or([0u8; 32]);
-            T::OriginRecorder::record_origin(node, parent_hash)?;
-
             Listings::<T>::remove(node);
-            Self::deposit_event(Event::<T>::Sold {
-                node,
-                seller: listing.seller,
-                buyer,
-                price: listing.price,
-                fee,
-            });
+
+            if let Some(recip) = recipient {
+                // Gift purchase path: transfer to recipient in "offered" state.
+                ensure!(recip != buyer, Error::<T>::BuyerIsRecipient);
+                ensure!(recip != listing.seller, Error::<T>::SellerIsRecipient);
+
+                T::NameRegistry::offer_bought_name(&listing.seller, &buyer, &recip, node)?;
+
+                Self::deposit_event(Event::<T>::NameBoughtForRecipient {
+                    node,
+                    seller: listing.seller,
+                    buyer,
+                    recipient: recip,
+                    price: listing.price,
+                    fee,
+                });
+            } else {
+                // Standard purchase path: transfer directly to buyer.
+                T::NameRegistry::transfer_name(&listing.seller, &buyer, node)?;
+
+                // Clear stale DNS records from the seller, then write the buyer's SS58 and ORIGIN.
+                T::RecordCleaner::clear_records_except_ss58(node);
+                T::Ss58Updater::update_ss58(node, &buyer)?;
+                let parent_hash: [u8; 32] = polkadot_sdk::frame_system::Pallet::<T>::parent_hash()
+                    .as_ref()
+                    .try_into()
+                    .unwrap_or([0u8; 32]);
+                T::OriginRecorder::record_origin(node, parent_hash)?;
+
+                Self::deposit_event(Event::<T>::Sold {
+                    node,
+                    seller: listing.seller,
+                    buyer,
+                    price: listing.price,
+                    fee,
+                });
+            }
             Ok(())
         }
     }
