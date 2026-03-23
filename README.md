@@ -84,12 +84,35 @@ The node exposes custom PNS endpoints under the `pns_` namespace:
 |---|---|---|
 | `pns_getInfo` | `node: H256` (namehash) | `NameRecord \| null` |
 | `pns_resolveName` | `name: String` (e.g. `"alice"`) | `NameRecord \| null` |
-| `pns_lookup` | `node: H256` (namehash) | `Array<[recordType: u32, data: Bytes]>` |
+| `pns_lookup` | `node: H256` (namehash), `record_types: u32[]` | `Array<[recordType: u32, data: Bytes]>` |
+| `pns_lookupByName` | `name: String`, `record_types: u32[]` | `Array<[recordType: u32, data: Bytes]>` |
 | `pns_getListing` | `name: String` (e.g. `"alice"`) | `ListingInfo \| null` |
+| `pns_all` | *(none)* | `Array<[H256, RegistrarInfo]>` |
+| `pns_accountDashboard` | `account: AccountId` | dashboard object (see below) |
 
 `pns_resolveName` computes the namehash internally against the native base node (`.dot`), so callers pass a plain label string rather than a raw hash. Resolution is **case-insensitive** — `"Alice"`, `"alice"`, and `"ALICE"` all resolve identically.
 
-Both `pns_getInfo` and `pns_resolveName` return `null` if the name does not exist **or has expired**. A `null` response means the name is available (or in its grace period and available for renewal only).
+Both `pns_getInfo` and `pns_resolveName` return `null` if the name does not exist **or has expired**. A `null` response means the name is available (or in its grace period and available for renewal only). Names in the gift waiting room (`OfferedNames`) also return `null`.
+
+`pns_lookup` and `pns_lookupByName` accept a list of record type codes (e.g. `[1, 28, 65280]`) and return all matching DNS records for that name. The SS58 record (65280) is always included when it exists, even if not explicitly requested. `pns_lookupByName` computes the hash internally — one round-trip instead of two.
+
+`pns_all` dumps every registered name and its registration details. It reads the entire `RegistrarInfos` table and is intended for indexers and block explorers, not normal app use.
+
+`pns_accountDashboard` returns the complete name portfolio for an account in a single call:
+
+```json
+{
+  "primary_name": "<H256 or null>",
+  "subnames": ["<H256>", "..."],
+  "pending_subname_offers": ["<H256>", "..."],
+  "pending_name_offers": ["<H256>", "..."]
+}
+```
+
+- **primary_name** — the account's canonical name hash, or null
+- **subnames** — all active subname hashes held by this account
+- **pending_subname_offers** — subname hashes offered to this account that haven't been accepted yet
+- **pending_name_offers** — top-level name gift hashes waiting for this account to accept
 
 ### Checking name availability
 
@@ -227,6 +250,20 @@ Then connect via [Polkadot.js Apps](https://polkadot.js.org/apps) pointing to `w
 ```bash
 npx @polkadot/apps
 ```
+
+## Reserved Names
+
+The following names can never be registered by anyone. They were reserved at genesis at the request of the Polkadot Technical Fellowship:
+
+```
+polkadot  kusama    paseo      westend   fellowship
+hub       polkadothub  assethub  collectives  pusd
+pop       revive    jam        people    dap
+```
+
+The network manager can add further reserved names after launch via `add_reserved`, and remove them via `remove_reserved`.
+
+---
 
 ## Roadmap
 

@@ -18,8 +18,8 @@ A **canonical name** is a name like `alice.dot` — a full, top-level name that 
 
 Shorter names cost more than longer ones. The price is set by the network manager and depends on how many characters are in the name:
 
-- A 1-character name has a different price than a 2-character name, a 3-character name, and so on up to 10+ characters.
-- A 10-character name and an 11-character name cost the same.
+- A 1-character name has a different price than a 2-character name, a 3-character name, and so on up to 6+ characters.
+- A 6-character name and an 11-character name cost the same.
 - The fee is the same whether you are registering or renewing.
 
 ### Case Does Not Matter
