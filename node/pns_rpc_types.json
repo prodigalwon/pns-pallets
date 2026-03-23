@@ -15,16 +15,18 @@
       "type": "Option<Json>"
     },
     "lookup": {
-      "description": "Get all DNS records stored for a namehash (H256). Returns an array of [record_type_code, bytes] pairs.",
+      "description": "Get DNS records stored for a namehash (H256), filtered by record type codes. Returns an array of [record_type_code, bytes] pairs.",
       "params": [
-        { "name": "node", "type": "H256" }
+        { "name": "node", "type": "H256" },
+        { "name": "record_types", "type": "Vec<u32>" }
       ],
       "type": "Vec<(u32, Bytes)>"
     },
     "lookupByName": {
-      "description": "Get all DNS records for a plain label or dotted name (e.g. 'alice' or 'sub.alice'). Single round-trip equivalent of pns_nameToHash + pns_lookup.",
+      "description": "Get DNS records for a plain label or dotted name (e.g. 'alice' or 'sub.alice'), filtered by record type codes. Returns an array of [record_type_code, bytes] pairs.",
       "params": [
-        { "name": "name", "type": "Text" }
+        { "name": "name", "type": "Text" },
+        { "name": "record_types", "type": "Vec<u32>" }
       ],
       "type": "Vec<(u32, Bytes)>"
     },
@@ -35,24 +37,17 @@
       ],
       "type": "Option<Json>"
     },
-    "nameToHash": {
-      "description": "Compute the namehash (H256) for a plain label or dotted name (e.g. 'alice' or 'sub.alice'). Returns null if the name is malformed. Use this to get the hash needed by pns_getInfo, pns_lookup, and pns_isUseable.",
-      "params": [
-        { "name": "name", "type": "Text" }
-      ],
-      "type": "Option<H256>"
-    },
     "all": {
       "description": "Return every registered name and its registrar info as an array of [namehash, info] pairs. Intended for indexers and explorers.",
       "params": [],
       "type": "Vec<(H256, Json)>"
     },
-    "isUseable": {
-      "description": "Check whether a name (by namehash) is currently registered and not expired. Returns true if the name is in its active registration period.",
+    "accountDashboard": {
+      "description": "Return the full name portfolio for an account in a single call. Includes: primary_name (H256 or null), subnames (array of H256), pending_subname_offers (array of H256), and pending_name_offers (array of H256).",
       "params": [
-        { "name": "node", "type": "H256" }
+        { "name": "account", "type": "AccountId" }
       ],
-      "type": "bool"
+      "type": "Json"
     }
   }
 }

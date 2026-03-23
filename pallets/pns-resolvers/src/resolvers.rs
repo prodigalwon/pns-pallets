@@ -139,21 +139,54 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         /// Return DNS records for a domain namehash.
         ///
-        /// SS58 is always included in the response. Any additional `record_types`
-        /// requested are fetched individually — no other records are returned.
-        /// Pass an empty vec to get only the SS58 address.
+        /// SS58 (65280) and ORIGIN (65290) are always included in the response as
+        /// proof anchors — they are chain-managed and not caller-controlled.
+        /// Additional types are fetched only if explicitly listed in `record_types`.
+        ///
+        /// The following types are blocked from `record_types` and silently dropped
+        /// if present — they are either auto-included, protocol-level DNS mechanism
+        /// records that are never stored per-name, or bulk transfer types:
+        ///   SS58, ORIGIN, ANY, AXFR, IXFR, OPT, TSIG, SIG, RRSIG,
+        ///   NSEC, NSEC3, NSEC3PARAM, DNSKEY, CDNSKEY, CDS, DS
         pub fn lookup(node: pns_types::DomainHash, record_types: Vec<RecordType>) -> Vec<(RecordType, Vec<u8>)> {
+            const BLOCKED: &[RecordType] = &[
+                RecordType::SS58,       // chain-managed, always returned unconditionally
+                RecordType::ORIGIN,     // chain-managed, always returned unconditionally
+                RecordType::ANY,        // bulk request — RFC 8482 deprecated
+                RecordType::AXFR,       // zone transfer
+                RecordType::IXFR,       // incremental zone transfer
+                RecordType::OPT,        // EDNS meta-record, not zone data
+                RecordType::TSIG,       // DNS transaction signature
+                RecordType::SIG,        // obsolete DNSSEC signature
+                RecordType::RRSIG,      // DNSSEC resource record signature
+                RecordType::NSEC,       // DNSSEC denial-of-existence
+                RecordType::NSEC3,      // DNSSEC denial-of-existence v3
+                RecordType::NSEC3PARAM, // DNSSEC NSEC3 parameters
+                RecordType::DNSKEY,     // DNSSEC zone signing key
+                RecordType::CDNSKEY,    // child DNSKEY
+                RecordType::CDS,        // child DS
+                RecordType::DS,         // delegation signer
+            ];
+
             let mut results = Vec::new();
+
+            // SS58 and ORIGIN are proof anchors — included unconditionally.
             let ss58 = Records::<T>::get(node, RecordType::SS58);
             if !ss58.is_empty() {
                 results.push((RecordType::SS58, ss58.to_vec()));
             }
+            let origin = Records::<T>::get(node, RecordType::ORIGIN);
+            if !origin.is_empty() {
+                results.push((RecordType::ORIGIN, origin.to_vec()));
+            }
+
             for rt in record_types {
-                if rt != RecordType::SS58 {
-                    let content = Records::<T>::get(node, rt);
-                    if !content.is_empty() {
-                        results.push((rt, content.to_vec()));
-                    }
+                if BLOCKED.contains(&rt) {
+                    continue;
+                }
+                let content = Records::<T>::get(node, rt);
+                if !content.is_empty() {
+                    results.push((rt, content.to_vec()));
                 }
             }
             results
@@ -247,12 +280,6 @@ impl WeightInfo for () {
 }
 
 impl<C: Config> Pallet<C> {
-    pub fn lookup_all(id: DomainHash) -> Vec<(RecordType, Vec<u8>)> {
-        Records::<C>::iter_prefix(id)
-            .map(|(k2, v)| (k2, v.to_vec()))
-            .collect::<Vec<(RecordType, Vec<u8>)>>()
-    }
-
     /// Write the SS58 record for `node` from the owner's encoded account bytes.
     ///
     /// This is an internal privileged path: it bypasses the normal user-facing

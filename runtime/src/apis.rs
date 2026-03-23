@@ -318,12 +318,8 @@ impl_runtime_apis! {
 		fn all() -> Vec<(pns_types::DomainHash, pns_types::RegistrarInfo<u64, Balance>)> {
 			pns_registrar::registrar::Pallet::<Runtime>::all()
 		}
-		fn lookup(id: pns_types::DomainHash) -> Vec<(pns_types::ddns::codec_type::RecordType, Vec<u8>)> {
-			pns_resolvers::resolvers::Pallet::<Runtime>::lookup_all(id)
-		}
-		fn check_node_useable(node: pns_types::DomainHash, _owner: &AccountId) -> bool {
-			use pns_registrar::traits::Registrar;
-			pns_registrar::registrar::Pallet::<Runtime>::check_expires_useable(node).is_ok()
+		fn lookup(id: pns_types::DomainHash, record_types: Vec<pns_types::ddns::codec_type::RecordType>) -> Vec<(pns_types::ddns::codec_type::RecordType, Vec<u8>)> {
+			pns_resolvers::resolvers::Pallet::<Runtime>::lookup(id, record_types)
 		}
 		fn get_listing(name: Vec<u8>) -> Option<pns_types::ListingInfo<AccountId, Balance, u64>> {
 			use pns_registrar::traits::Label;
@@ -366,36 +362,33 @@ impl_runtime_apis! {
 				read_block_hash: Default::default(),
 			})
 		}
-		fn name_to_hash(name: Vec<u8>) -> Option<pns_types::DomainHash> {
-			pns_types::parse_name_to_node(&name, &pns_types::NATIVE_BASENODE)
-		}
-		fn lookup_by_name(name: Vec<u8>) -> Vec<(pns_types::ddns::codec_type::RecordType, Vec<u8>)> {
+		fn lookup_by_name(name: Vec<u8>, record_types: Vec<pns_types::ddns::codec_type::RecordType>) -> Vec<(pns_types::ddns::codec_type::RecordType, Vec<u8>)> {
 			let node = pns_types::parse_name_to_node(&name, &pns_types::NATIVE_BASENODE)
 				.unwrap_or_default();
-			pns_resolvers::resolvers::Pallet::<Runtime>::lookup_all(node)
-		}
-		fn primary_name(owner: AccountId) -> Option<pns_types::DomainHash> {
-			pns_registrar::registrar::OwnerToPrimaryName::<Runtime>::get(&owner)
-		}
-		fn subnames_of(owner: AccountId) -> Vec<pns_types::DomainHash> {
-			pns_registrar::registry::AccountToSubnames::<Runtime>::iter_prefix(&owner)
-				.map(|(hash, _)| hash)
-				.collect()
+			pns_resolvers::resolvers::Pallet::<Runtime>::lookup(node, record_types)
 		}
 		fn get_subname(node: pns_types::DomainHash) -> Option<pns_types::SubnameRecord<AccountId>> {
 			pns_registrar::registry::SubnameRecords::<Runtime>::get(node)
 		}
-		fn pending_offers_for(account: AccountId) -> Vec<pns_types::DomainHash> {
-			pns_registrar::registry::OfferedToAccount::<Runtime>::iter_prefix(&account)
+		fn account_dashboard(owner: AccountId) -> pns_types::AccountDashboard {
+			let primary_name = pns_registrar::registrar::OwnerToPrimaryName::<Runtime>::get(&owner);
+			let subnames = pns_registrar::registry::AccountToSubnames::<Runtime>::iter_prefix(&owner)
 				.map(|(hash, _)| hash)
-				.collect()
-		}
-		fn pending_name_offers_for(account: AccountId) -> Vec<pns_types::DomainHash> {
-			pns_registrar::registrar::OfferedNames::<Runtime>::iter()
+				.collect();
+			let pending_subname_offers = pns_registrar::registry::OfferedToAccount::<Runtime>::iter_prefix(&owner)
+				.map(|(hash, _)| hash)
+				.collect();
+			let pending_name_offers = pns_registrar::registrar::OfferedNames::<Runtime>::iter()
 				.filter_map(|(node, record)| {
-					if record.recipient == account { Some(node) } else { None }
+					if record.recipient == owner { Some(node) } else { None }
 				})
-				.collect()
+				.collect();
+			pns_types::AccountDashboard {
+				primary_name,
+				subnames,
+				pending_subname_offers,
+				pending_name_offers,
+			}
 		}
 	}
 

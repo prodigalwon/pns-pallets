@@ -323,6 +323,12 @@ pub mod pallet {
         /// registering domain names greater than 10 in length.
         ///
         /// Ensure: The name must be unoccupied.
+        ///
+        /// `reject_offer`: Optional — reject a pending offered name (top-level or subdomain) before
+        /// registering. Pass the plain label (e.g. `b"bob"` or `b"sub.parent"`) of the name to
+        /// reject. The caller must be the intended recipient of the offer. For top-level offered
+        /// names the NFT is burned (non-refundable). For subdomain offers the record is fully
+        /// revoked.
         #[pallet::call_index(2)]
         #[pallet::weight(T::WeightInfo::register(name.len() as u32))]
         #[polkadot_sdk::frame_support::transactional]
@@ -330,11 +336,6 @@ pub mod pallet {
             origin: OriginFor<T>,
             name: Vec<u8>,
             owner: <T::Lookup as StaticLookup>::Source,
-            /// Optional: reject a pending offered name (top-level or subdomain) before registering.
-            /// Pass the plain label (e.g. `b"bob"` or `b"sub.parent"`) of the name to reject.
-            /// The caller must be the intended recipient of the offer.
-            /// For top-level offered names the NFT is burned (non-refundable).
-            /// For subdomain offers the record is fully revoked.
             reject_offer: Option<Vec<u8>>,
         ) -> DispatchResult {
             let caller = ensure_signed(origin)?;

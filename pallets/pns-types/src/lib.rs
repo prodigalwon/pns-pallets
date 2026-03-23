@@ -118,6 +118,20 @@ pub struct OfferedNameRecord<AccountId> {
     pub recipient: AccountId,
 }
 
+/// Account-level summary returned by `pns_accountDashboard`.
+/// Aggregates all name portfolio data for an account in a single call.
+#[derive(Serialize, Deserialize, Encode, Decode, PartialEq, Eq, Clone, TypeInfo, Debug)]
+pub struct AccountDashboard {
+    /// Namehash of the canonical (primary) name registered to this account, or `None`.
+    pub primary_name: Option<DomainHash>,
+    /// Namehashes of all active subnames held by this account.
+    pub subnames: polkadot_sdk::sp_std::vec::Vec<DomainHash>,
+    /// Namehashes of pending subdomain offers awaiting acceptance by this account.
+    pub pending_subname_offers: polkadot_sdk::sp_std::vec::Vec<DomainHash>,
+    /// Namehashes of top-level name gift offers awaiting acceptance by this account.
+    pub pending_name_offers: polkadot_sdk::sp_std::vec::Vec<DomainHash>,
+}
+
 pub type DomainHash = sp_core::H256;
 
 /// Namehash of "dot" — the Polkadot TLD base node.

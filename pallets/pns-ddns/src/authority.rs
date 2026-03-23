@@ -312,10 +312,18 @@ where
             return Continue(Err(LookupError::NameExists));
         }
 
-        // Call the runtime API
+        // Call the runtime API — request only what this query needs.
+        // For ANY, request all known types (DDNS will still filter via pns_record_to_dns).
+        // For a specific type, request only that type (SS58 is always returned alongside it).
+        use pns_types::ddns::codec_type::RecordType as PnsRt;
+        let filter: Vec<PnsRt> = if rtype == RecordType::ANY {
+            PnsRt::all().to_vec()
+        } else {
+            vec![rtype.into()]
+        };
         let api = self.client.runtime_api();
         let raw_records: Vec<(pns_types::ddns::codec_type::RecordType, Vec<u8>)> =
-            match api.lookup_by_name(at, label.into_bytes()) {
+            match api.lookup_by_name(at, label.into_bytes(), filter) {
             Ok(r) => r,
             Err(e) => {
                 warn!("BlockChainAuthority: lookup_by_name error: {:?}", e);
