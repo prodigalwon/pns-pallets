@@ -5,33 +5,28 @@ use std::sync::{
 
 use tracing::debug;
 
-/// Atomic counters covering all DNS drop reasons, cache events, and response types.
-/// Logged at DEBUG level every 60 seconds. Prometheus integration can be added
-/// by reading these counters from a metrics endpoint.
+/// Atomic counters covering DNS drop reasons, cache events, and response types.
+/// Retained for API compatibility; counters are not incremented in stub mode.
+/// The snorkel daemon has its own metrics with the same counter names.
 #[derive(Default)]
 pub struct DnsMetrics {
-    // ── Drop reasons ────────────────────────────────────────────────────────
     pub drop_inflight_cap:      AtomicU64,
     pub drop_any_query:         AtomicU64,
     pub drop_src_rate_limit:    AtomicU64,
     pub drop_zone_rate_limit:   AtomicU64,
     pub drop_penalty_backoff:   AtomicU64,
-    pub drop_bloom_pre_filter:  AtomicU64,
     pub drop_storage_timeout:   AtomicU64,
     pub drop_storage_rate_limit:AtomicU64,
     pub drop_label_validation:  AtomicU64,
     pub drop_cname_depth:       AtomicU64,
 
-    // ── Cache ────────────────────────────────────────────────────────────────
     pub neg_cache_hit:   AtomicU64,
-    pub first_seen_miss: AtomicU64,   // first query for a name (admitted to first-seen cache)
-    pub first_seen_hit:  AtomicU64,   // second query — promoted to negative cache
+    pub first_seen_miss: AtomicU64,
+    pub first_seen_hit:  AtomicU64,
 
-    // ── Storage ──────────────────────────────────────────────────────────────
     pub storage_lookups:  AtomicU64,
     pub storage_timeouts: AtomicU64,
 
-    // ── Response types ───────────────────────────────────────────────────────
     pub resp_noerror:  AtomicU64,
     pub resp_nxdomain: AtomicU64,
     pub resp_refused:  AtomicU64,
@@ -51,7 +46,6 @@ impl DnsMetrics {
             drop_src_rate_limit     = self.drop_src_rate_limit.load(Ordering::Relaxed),
             drop_zone_rate_limit    = self.drop_zone_rate_limit.load(Ordering::Relaxed),
             drop_penalty_backoff    = self.drop_penalty_backoff.load(Ordering::Relaxed),
-            drop_bloom_pre_filter   = self.drop_bloom_pre_filter.load(Ordering::Relaxed),
             drop_storage_timeout    = self.drop_storage_timeout.load(Ordering::Relaxed),
             drop_storage_rate_limit = self.drop_storage_rate_limit.load(Ordering::Relaxed),
             drop_label_validation   = self.drop_label_validation.load(Ordering::Relaxed),

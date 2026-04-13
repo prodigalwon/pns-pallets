@@ -67,7 +67,7 @@ pub mod pallet {
     #[pallet::pallet]
     pub struct Pallet<T>(_);
 
-    // TODO: 只有11档价格，并且档数的选择与域名长度相关
+    // 11 price tiers, tier selection keyed by domain name length.
     #[pallet::storage]
     pub type BasePrice<T: Config> = StorageValue<_, [BalanceOf<T>; 11], ValueQuery>;
 
@@ -202,15 +202,7 @@ impl<T: Config> ExchangeRateT for Pallet<T> {
 }
 
 impl WeightInfo for () {
-    fn set_exchange_rate() -> Weight {
-        Weight::zero()
-    }
-
-    fn set_base_price() -> Weight {
-        Weight::zero()
-    }
-
-    fn set_rent_price() -> Weight {
-        Weight::zero()
-    }
+    fn set_exchange_rate() -> Weight { Weight::from_parts(150_000_000, 500) }
+    fn set_base_price() -> Weight { Weight::from_parts(150_000_000, 500) }
+    fn set_rent_price() -> Weight { Weight::from_parts(150_000_000, 500) }
 }

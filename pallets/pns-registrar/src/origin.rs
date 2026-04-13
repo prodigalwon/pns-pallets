@@ -190,23 +190,9 @@ pub trait WeightInfo {
 }
 
 impl WeightInfo for () {
-    fn set_registrar_open() -> Weight {
-        Weight::zero()
-    }
-
-    fn set_origin_true() -> Weight {
-        Weight::zero()
-    }
-
-    fn set_origin_false() -> Weight {
-        Weight::zero()
-    }
-
-    fn set_origin_for_root_true() -> Weight {
-        Weight::zero()
-    }
-
-    fn set_origin_for_root_false() -> Weight {
-        Weight::zero()
-    }
+    fn set_registrar_open() -> Weight { Weight::from_parts(150_000_000, 500) }
+    fn set_origin_true() -> Weight { Weight::from_parts(150_000_000, 500) }
+    fn set_origin_false() -> Weight { Weight::from_parts(150_000_000, 500) }
+    fn set_origin_for_root_true() -> Weight { Weight::from_parts(150_000_000, 500) }
+    fn set_origin_for_root_false() -> Weight { Weight::from_parts(150_000_000, 500) }
 }

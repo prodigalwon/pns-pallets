@@ -1,11 +1,12 @@
 use crate::{
 	benchmarking::{inherent_benchmark_data, RemarkBuilder, TransferKeepAliveBuilder},
 	chain_spec,
-	cli::{Cli, Subcommand},
+	cli::{Cli, RelayChainCli, Subcommand},
 	service,
 };
-use pns_ddns;
+use cumulus_primitives_core::ParaId;
 use frame_benchmarking_cli::{BenchmarkCmd, ExtrinsicFactory, SUBSTRATE_REFERENCE_HARDWARE};
+use pns_ddns;
 use sc_cli::SubstrateCli;
 use sc_service::PartialComponents;
 use solochain_template_runtime::{Block, EXISTENTIAL_DEPOSIT};
@@ -13,7 +14,7 @@ use sp_keyring::Sr25519Keyring;
 
 impl SubstrateCli for Cli {
 	fn impl_name() -> String {
-		"Substrate Node".into()
+		"PNS Node".into()
 	}
 
 	fn impl_version() -> String {
@@ -40,9 +41,10 @@ impl SubstrateCli for Cli {
 		Ok(match id {
 			"dev" => Box::new(chain_spec::development_chain_spec()?),
 			"" | "local" => Box::new(chain_spec::local_chain_spec()?),
-			path => {
-				Box::new(chain_spec::ChainSpec::from_json_file(std::path::PathBuf::from(path))?)
-			},
+			"paseo" => Box::new(chain_spec::paseo_chain_spec(5169)?),
+			path => Box::new(chain_spec::ChainSpec::from_json_file(
+				std::path::PathBuf::from(path),
+			)?),
 		})
 	}
 }
@@ -57,6 +59,17 @@ pub fn run() -> sc_cli::Result<()> {
 		Some(Subcommand::BuildSpec(cmd)) => {
 			let runner = cli.create_runner(cmd)?;
 			runner.sync_run(|config| cmd.run(config.chain_spec, config.network))
+		},
+		Some(Subcommand::ExportGenesisState(cmd)) => {
+			let runner = cli.create_runner(cmd)?;
+			runner.sync_run(|config| {
+				let PartialComponents { client, .. } = service::new_partial(&config)?;
+				cmd.run(client)
+			})
+		},
+		Some(Subcommand::ExportGenesisWasm(cmd)) => {
+			let runner = cli.create_runner(cmd)?;
+			runner.sync_run(|config| cmd.run(&*config.chain_spec))
 		},
 		Some(Subcommand::CheckBlock(cmd)) => {
 			let runner = cli.create_runner(cmd)?;
@@ -94,26 +107,30 @@ pub fn run() -> sc_cli::Result<()> {
 		},
 		Some(Subcommand::PurgeChain(cmd)) => {
 			let runner = cli.create_runner(cmd)?;
-			runner.sync_run(|config| cmd.run(config.database))
+			runner.sync_run(|config| {
+				let polkadot_cli = RelayChainCli::new(&config, cli.relay_chain_args.iter());
+				let polkadot_config = sc_cli::SubstrateCli::create_configuration(
+					&polkadot_cli,
+					&polkadot_cli,
+					config.tokio_handle.clone(),
+				)
+				.map_err(|e| format!("Relay chain argument error: {}", e))?;
+
+				cmd.run(config, polkadot_config)
+			})
 		},
 		Some(Subcommand::Revert(cmd)) => {
 			let runner = cli.create_runner(cmd)?;
 			runner.async_run(|config| {
 				let PartialComponents { client, task_manager, backend, .. } =
 					service::new_partial(&config)?;
-				let aux_revert = Box::new(|client, _, blocks| {
-					sc_consensus_grandpa::revert(client, blocks)?;
-					Ok(())
-				});
-				Ok((cmd.run(client, backend, Some(aux_revert)), task_manager))
+				Ok((cmd.run(client, backend, None), task_manager))
 			})
 		},
 		Some(Subcommand::Benchmark(cmd)) => {
 			let runner = cli.create_runner(cmd)?;
 
 			runner.sync_run(|config| {
-				// This switch needs to be in the client, since the client decides
-				// which sub-commands it wants to support.
 				match cmd {
 					BenchmarkCmd::Pallet(cmd) => {
 						if !cfg!(feature = "runtime-benchmarks") {
@@ -162,7 +179,6 @@ pub fn run() -> sc_cli::Result<()> {
 					},
 					BenchmarkCmd::Extrinsic(cmd) => {
 						let PartialComponents { client, .. } = service::new_partial(&config)?;
-						// Register the *Remark* and *TKA* builders.
 						let ext_factory = ExtrinsicFactory(vec![
 							Box::new(RemarkBuilder::new(client.clone())),
 							Box::new(TransferKeepAliveBuilder::new(
@@ -186,25 +202,59 @@ pub fn run() -> sc_cli::Result<()> {
 		},
 		None => {
 			let dns_config = pns_ddns::DnsConfig {
-				port:             cli.dns_port,
-				workers:          cli.dns_workers,
-				cores:            cli.dns_cores.clone(),
-				min_response_ms:  cli.dns_min_response_ms,
+				port: cli.dns_port,
+				workers: cli.dns_workers,
+				cores: cli.dns_cores.clone(),
+				min_response_ms: cli.dns_min_response_ms,
 			};
 			let no_dns = cli.no_dns;
-			let runner = cli.create_runner(&cli.run)?;
+			let runner = cli.create_runner(&cli.run.base)?;
+
+			let collator_options = cli.run.collator_options();
+
 			runner.run_node_until_exit(|config| async move {
+				let para_id =
+					chain_spec::Extensions::try_get(&*config.chain_spec)
+						.map(|e| e.para_id)
+						.ok_or("Could not find parachain extension in chain-spec. \
+							Use a chain spec with relay_chain and para_id fields, \
+							or generate one with `export-chain-spec`.")?;
+
+				let polkadot_cli =
+					RelayChainCli::new(&config, cli.relay_chain_args.iter());
+
+				let para_id = ParaId::from(para_id);
+
+				let polkadot_config = sc_cli::SubstrateCli::create_configuration(
+					&polkadot_cli,
+					&polkadot_cli,
+					config.tokio_handle.clone(),
+				)
+				.map_err(|e| format!("Relay chain argument error: {}", e))?;
+
 				match config.network.network_backend {
-					sc_network::config::NetworkBackendType::Libp2p => service::new_full::<
-						sc_network::NetworkWorker<
-							solochain_template_runtime::opaque::Block,
-							<solochain_template_runtime::opaque::Block as sp_runtime::traits::Block>::Hash,
-						>,
-					>(config, no_dns, dns_config)
-					.map_err(sc_cli::Error::Service),
+					sc_network::config::NetworkBackendType::Libp2p =>
+						service::start_parachain_node::<
+							sc_network::NetworkWorker<
+								solochain_template_runtime::opaque::Block,
+								<solochain_template_runtime::opaque::Block as sp_runtime::traits::Block>::Hash,
+							>,
+						>(config, polkadot_config, collator_options, para_id, no_dns, dns_config)
+						.await
+						.map(|r| r.0)
+						.map_err(sc_cli::Error::Service),
 					sc_network::config::NetworkBackendType::Litep2p =>
-						service::new_full::<sc_network::Litep2pNetworkBackend>(config, no_dns, dns_config)
-							.map_err(sc_cli::Error::Service),
+						service::start_parachain_node::<sc_network::Litep2pNetworkBackend>(
+							config,
+							polkadot_config,
+							collator_options,
+							para_id,
+							no_dns,
+							dns_config,
+						)
+						.await
+						.map(|r| r.0)
+						.map_err(sc_cli::Error::Service),
 				}
 			})
 		},

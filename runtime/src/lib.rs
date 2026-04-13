@@ -53,7 +53,6 @@ pub mod opaque {
 impl_opaque_keys! {
 	pub struct SessionKeys {
 		pub aura: Aura,
-		pub grandpa: Grandpa,
 	}
 }
 
@@ -196,7 +195,7 @@ mod runtime {
 	pub type Aura = pallet_aura;
 
 	#[runtime::pallet_index(3)]
-	pub type Grandpa = pallet_grandpa;
+	pub type ParachainSystem = cumulus_pallet_parachain_system;
 
 	#[runtime::pallet_index(4)]
 	pub type Balances = pallet_balances;
@@ -228,6 +227,15 @@ mod runtime {
 
 	#[runtime::pallet_index(13)]
 	pub type PnsMarketplace = pns_marketplace;
+
+	#[runtime::pallet_index(14)]
+	pub type ParachainInfo = parachain_info;
+
+	#[runtime::pallet_index(15)]
+	pub type AuraExt = cumulus_pallet_aura_ext;
+
+	#[runtime::pallet_index(16)]
+	pub type MessageQueue = pallet_message_queue;
 }
 
 /// Executive: handles dispatch to the various modules.
@@ -238,3 +246,8 @@ pub type Executive = frame_executive::Executive<
 	Runtime,
 	AllPalletsWithSystem,
 >;
+
+cumulus_pallet_parachain_system::register_validate_block! {
+	Runtime = Runtime,
+	BlockExecutor = cumulus_pallet_aura_ext::BlockExecutor::<Runtime, Executive>,
+}

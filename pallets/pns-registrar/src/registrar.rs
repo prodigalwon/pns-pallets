@@ -8,7 +8,7 @@
 //!         pub expire: Duration,
 //!         /// Capacity of subdomains that can be created
 //!         pub capacity: u32,
-//!         /// Registration fee (burned at registration time)
+//!         /// Registration fee paid at registration time
 //!         pub register_fee: Balance,
 //!     }
 //! ```
@@ -16,9 +16,9 @@
 //! Some of the methods in this module involve the transfer of money,
 //! so you need to be as careful as possible when reviewing them.
 //!
-//! Registration and renewal fees are burned via `Currency::withdraw` drop.
-//! There is no deposit — the fee is non-refundable and covers the cost of
-//! occupying chain state for the lifetime of the registration.
+//! 5% of the registration fee is held on the registrant's account as a
+//! cleanup deposit (pallet-scoped hold). The remaining 95% is withdrawn
+//! and split: 40% to the block author, 55% to PnsCustodian.
 //!
 //! ### Module functions
 //! - `add_reserved` - adds a pre-reserved domain name (pre-reserved domains cannot be registered), requires manager privileges
@@ -39,15 +39,18 @@ pub type BalanceOf<T> = <<T as Config>::Currency as polkadot_sdk::frame_support:
 #[polkadot_sdk::frame_support::pallet]
 pub mod pallet {
     use super::*;
-    use crate::traits::{IsRegistrarOpen, Label, Official, OriginRecorder, PriceOracle, RecordCleaner, Registry, Ss58Updater};
+    use crate::traits::{BlockAuthor, IsRegistrarOpen, Label, Official, OriginRecorder, PriceOracle, RecordCleaner, Registry, Ss58Updater};
     use polkadot_sdk::frame_support::{
         pallet_prelude::*,
-        traits::{Currency, EnsureOrigin, ExistenceRequirement, Time},
+        traits::{
+            Currency, EnsureOrigin, ExistenceRequirement, Time,
+            tokens::fungible::hold::Mutate as HoldMutate,
+        },
         Twox64Concat,
     };
     use polkadot_sdk::frame_system::{ensure_signed, pallet_prelude::*};
     use pns_types::{DomainHash, RegistrarInfo};
-    use polkadot_sdk::sp_runtime::traits::{AtLeast32Bit, CheckedAdd, MaybeSerializeDeserialize, StaticLookup};
+    use polkadot_sdk::sp_runtime::traits::{AtLeast32Bit, CheckedAdd, MaybeSerializeDeserialize, Saturating, StaticLookup, Zero};
     use polkadot_sdk::sp_runtime::{ArithmeticError, SaturatedConversion};
     use polkadot_sdk::sp_std::vec::Vec;
 
@@ -57,6 +60,17 @@ pub mod pallet {
         type Registry: Registry<AccountId = Self::AccountId, Balance = BalanceOf<Self>>;
 
         type Currency: Currency<Self::AccountId>;
+
+        /// Composite hold reason. Must include this pallet's `HoldReason`.
+        type RuntimeHoldReason: From<HoldReason>;
+
+        /// Fungible hold interface — used to place pallet-scoped holds on
+        /// the registrant's balance. Only this pallet can release them.
+        type Fungible: HoldMutate<
+            Self::AccountId,
+            Reason = Self::RuntimeHoldReason,
+            Balance = BalanceOf<Self>,
+        >;
 
         type NowProvider: Time<Moment = Self::Moment>;
 
@@ -82,11 +96,21 @@ pub mod pallet {
         #[pallet::constant]
         type MaxRegistrationDuration: Get<Self::Moment>;
 
+        /// How long a gift-purchased name remains in "offered" state before the
+        /// offer expires and the name becomes re-registrable (90 days).
+        #[pallet::constant]
+        type OfferWindow: Get<Self::Moment>;
+
         type WeightInfo: WeightInfo;
 
         type PriceOracle: PriceOracle<Moment = Self::Moment, Balance = BalanceOf<Self>>;
 
         type ManagerOrigin: EnsureOrigin<Self::RuntimeOrigin, Success = Self::AccountId>;
+
+        type PnsCustodian: Get<Self::AccountId>;
+
+
+        type BlockAuthor: crate::traits::BlockAuthor<AccountId = Self::AccountId>;
 
         type IsOpen: IsRegistrarOpen;
 
@@ -105,10 +129,41 @@ pub mod pallet {
     #[pallet::pallet]
     pub struct Pallet<T>(_);
 
+    /// Hold reasons scoped to this pallet. Only PnsRegistrar can release these.
+    #[pallet::composite_enum]
+    pub enum HoldReason {
+        /// 5% of the registration fee, held on the registrant's account
+        /// until the expired name is cleaned up.
+        #[codec(index = 0)]
+        CleanupDeposit,
+    }
+
+    /// 5% of the registration fee, held on the registrant's SS58 via
+    /// a pallet-scoped hold (`HoldReason::CleanupDeposit`). Only this
+    /// pallet can release it. Tracks (depositor, amount) per name.
+    /// Released and paid to the cleanup() caller after expiry.
+    #[pallet::storage]
+    pub type CleanupDeposit<T: Config> =
+        StorageMap<_, Blake2_128Concat, DomainHash, (T::AccountId, BalanceOf<T>)>;
+
     /// `name_hash` -> Info{ `expire`, `capacity`, `register_fee`, `label_len` }
     #[pallet::storage]
     pub type RegistrarInfos<T: Config> =
         StorageMap<_, Blake2_128Concat, DomainHash, RegistrarInfoOf<T>>;
+
+    /// Reverse index: cleanup-eligible deadline (`expire + grace`) → name hashes.
+    /// The deadline is deterministic and computed at register/renew time.
+    /// cleanup() reads entries where the key ≤ now — no filtering needed.
+    #[pallet::storage]
+    pub type ExpiryIndex<T: Config> = StorageDoubleMap<
+        _,
+        Twox64Concat,
+        T::Moment,
+        Twox64Concat,
+        DomainHash,
+        (),
+        ValueQuery,
+    >;
 
     /// `name_hash` if in `reserved_list` -> ()
     #[pallet::storage]
@@ -126,7 +181,7 @@ pub mod pallet {
     /// Cleared when the recipient calls `accept_offered_name` or rejects via `register`.
     #[pallet::storage]
     pub type OfferedNames<T: Config> =
-        StorageMap<_, Blake2_128Concat, DomainHash, pns_types::OfferedNameRecord<T::AccountId>>;
+        StorageMap<_, Blake2_128Concat, DomainHash, pns_types::OfferedNameRecord<T::AccountId, T::Moment>>;
 
     pub type RegistrarInfoOf<T> = RegistrarInfo<<T as Config>::Moment, BalanceOf<T>>;
 
@@ -236,6 +291,13 @@ pub mod pallet {
             node: DomainHash,
             by: T::AccountId,
         },
+        /// Expired names were cleaned up. Deposits released from original
+        /// registrants and paid to the cleanup caller.
+        NamesCleaned {
+            count: u32,
+            caller: T::AccountId,
+            payout: BalanceOf<T>,
+        },
     }
 
     #[pallet::error]
@@ -279,6 +341,17 @@ pub mod pallet {
         OfferedNameNotFound,
         /// Caller is not the intended recipient of this name offer.
         NotOfferedNameRecipient,
+        /// The 90-day offer window has expired. The name is now re-registrable.
+        OfferExpired,
+        /// This name is in an active offered state and cannot be registered until
+        /// the recipient accepts, rejects, or the 90-day offer window expires.
+        NameInOfferedState,
+        InternalHashConversion,
+        /// Caller does not have enough free balance to cover the registration
+        /// fee plus the 5% cleanup deposit.
+        InsufficientBalance,
+        /// No names have expired past the grace period yet.
+        NotExpired,
     }
 
     #[pallet::call]
@@ -386,10 +459,20 @@ pub mod pallet {
                 Error::<T>::Frozen
             );
 
+            // Block registration if name is in an active (non-expired) offered state.
+            // If the offer window has expired, clean up the stale entry.
+            if let Some(offer) = OfferedNames::<T>::get(label_node) {
+                if offer.offered_at.checked_add(&T::OfferWindow::get()).map_or(false, |d| now < d) {
+                    return Err(Error::<T>::NameInOfferedState.into());
+                }
+                // Offer expired — clean up stale entry so registration can proceed.
+                OfferedNames::<T>::remove(label_node);
+            }
+
             // Enforce one name per address: no canonical name and no active subdomain.
             if let Some(existing_node) = OwnerToPrimaryName::<T>::get(&owner) {
                 let still_valid = RegistrarInfos::<T>::get(existing_node)
-                    .map(|info| now <= info.expire + T::GracePeriod::get())
+                    .map(|info| info.expire.checked_add(&T::GracePeriod::get()).map_or(false, |d| now <= d))
                     .unwrap_or(false);
                 if still_valid {
                     return Err(Error::<T>::AlreadyHasCanonicalName.into());
@@ -416,15 +499,45 @@ pub mod pallet {
                             OwnerToPrimaryName::<T>::remove(pre_owner);
                         }
                     }
+                    let deposit = fee / 20u32.into(); // 5% — held on registrant
+                    let spendable = fee - deposit;
+                    // Place a pallet-scoped hold on the registrant's account.
+                    T::Fungible::hold(
+                        &HoldReason::CleanupDeposit.into(),
+                        &caller,
+                        deposit,
+                    ).map_err(|_| Error::<T>::InsufficientBalance)?;
+                    CleanupDeposit::<T>::insert(label_node, (caller.clone(), deposit));
+                    // Withdraw the remaining 95% and split: 40% author, 55% custodian.
+                    use polkadot_sdk::frame_support::traits::Imbalance;
                     let imbalance = T::Currency::withdraw(
                         &caller,
-                        fee,
+                        spendable,
                         polkadot_sdk::frame_support::traits::WithdrawReasons::FEE,
                         ExistenceRequirement::KeepAlive,
                     )?;
-                    drop(imbalance);
+                    // 40/95 of the spendable goes to block author, remainder to custodian.
+                    use polkadot_sdk::sp_runtime::Perbill;
+                    let author_share = Perbill::from_rational(40u32, 95u32) * spendable;
+                    let (author_imbalance, org_imbalance) = imbalance.split(author_share);
+                    T::Currency::resolve_creating(&T::PnsCustodian::get(), org_imbalance);
+                    if let Some(author) = T::BlockAuthor::author() {
+                        T::Currency::resolve_creating(&author, author_imbalance);
+                    } else {
+                        T::Currency::resolve_creating(&T::PnsCustodian::get(), author_imbalance);
+                    }
                     let current_block = polkadot_sdk::frame_system::Pallet::<T>::block_number().saturated_into::<u32>();
+                    let deadline = expire
+                        .checked_add(&T::GracePeriod::get())
+                        .ok_or(ArithmeticError::Overflow)?;
                     RegistrarInfos::<T>::mutate(label_node, |info| -> DispatchResult {
+                        if let Some(old) = info.as_ref() {
+                            // Re-registration: remove stale expiry index entry.
+                            let old_deadline = old.expire
+                                .checked_add(&T::GracePeriod::get())
+                                .unwrap_or(old.expire);
+                            ExpiryIndex::<T>::remove(old_deadline, label_node);
+                        }
                         if let Some(info) = info.as_mut() {
                             info.register_fee = fee;
                             info.expire = expire;
@@ -441,6 +554,7 @@ pub mod pallet {
                         }
                         Ok(())
                     })?;
+                    ExpiryIndex::<T>::insert(deadline, label_node, ());
                     Ok(())
                 },
             )?;
@@ -455,7 +569,7 @@ pub mod pallet {
             let parent_hash: [u8; 32] = polkadot_sdk::frame_system::Pallet::<T>::parent_hash()
                 .as_ref()
                 .try_into()
-                .unwrap_or([0u8; 32]);
+                .map_err(|_| Error::<T>::InternalHashConversion)?;
             T::OriginRecorder::record_origin(label_node, parent_hash)?;
 
             Self::deposit_event(Event::<T>::NameRegistered {
@@ -493,16 +607,46 @@ pub mod pallet {
                 ensure!(now <= info.expire + grace_period, Error::<T>::NotRenewable);
                 let price = T::PriceOracle::registration_fee(info.label_len as usize)
                     .ok_or(ArithmeticError::Overflow)?;
+                let deposit = price / 20u32.into(); // 5%
+                let spendable = price - deposit;
+                // Release old hold before placing the new one.
+                if let Some((old_depositor, old_amount)) = CleanupDeposit::<T>::take(label_node) {
+                    let _ = Self::release_cleanup_hold(&old_depositor, old_amount, ReleaseReason::Replaced);
+                }
+                T::Fungible::hold(
+                    &HoldReason::CleanupDeposit.into(),
+                    &caller,
+                    deposit,
+                ).map_err(|_| Error::<T>::InsufficientBalance)?;
+                CleanupDeposit::<T>::insert(label_node, (caller.clone(), deposit));
+                use polkadot_sdk::frame_support::traits::Imbalance;
                 let imbalance = T::Currency::withdraw(
                     &caller,
-                    price,
+                    spendable,
                     polkadot_sdk::frame_support::traits::WithdrawReasons::FEE,
                     ExistenceRequirement::KeepAlive,
                 )?;
-                drop(imbalance);
+                // 40/95 of the spendable goes to block author, remainder to custodian.
+                use polkadot_sdk::sp_runtime::Perbill;
+                let author_share = Perbill::from_rational(40u32, 95u32) * spendable;
+                let (author_imbalance, org_imbalance) = imbalance.split(author_share);
+                T::Currency::resolve_creating(&T::PnsCustodian::get(), org_imbalance);
+                if let Some(author) = T::BlockAuthor::author() {
+                    T::Currency::resolve_creating(&author, author_imbalance);
+                } else {
+                    T::Currency::resolve_creating(&T::PnsCustodian::get(), author_imbalance);
+                }
+                let old_deadline = info.expire
+                    .checked_add(&grace_period)
+                    .unwrap_or(info.expire);
                 info.expire = now
                     .checked_add(&T::MaxRegistrationDuration::get())
                     .ok_or(ArithmeticError::Overflow)?;
+                let new_deadline = info.expire
+                    .checked_add(&grace_period)
+                    .ok_or(ArithmeticError::Overflow)?;
+                ExpiryIndex::<T>::remove(old_deadline, label_node);
+                ExpiryIndex::<T>::insert(new_deadline, label_node, ());
                 Self::deposit_event(Event::<T>::NameRenewed {
                     node: label_node,
                     owner: caller.clone(),
@@ -535,7 +679,7 @@ pub mod pallet {
             if let Some(info) = RegistrarInfos::<T>::get(node) {
                 let now = T::NowProvider::now();
                 ensure!(
-                    info.expire + T::GracePeriod::get() > now,
+                    info.expire.checked_add(&T::GracePeriod::get()).map_or(false, |d| d > now),
                     Error::<T>::NotOwned
                 );
             }
@@ -543,7 +687,7 @@ pub mod pallet {
             if let Some(existing) = OwnerToPrimaryName::<T>::get(&to) {
                 let now = T::NowProvider::now();
                 let still_valid = RegistrarInfos::<T>::get(existing)
-                    .map(|info| now <= info.expire + T::GracePeriod::get())
+                    .map(|info| info.expire.checked_add(&T::GracePeriod::get()).map_or(false, |d| now <= d))
                     .unwrap_or(false);
                 if still_valid {
                     return Err(Error::<T>::AlreadyHasCanonicalName.into());
@@ -551,6 +695,17 @@ pub mod pallet {
                 OwnerToPrimaryName::<T>::remove(&to);
             }
             ensure!(!T::Registry::has_active_subname(&to), Error::<T>::AlreadyHoldsSubdomain);
+
+            // Move the cleanup deposit from the old owner to the new owner.
+            if let Some((old_depositor, old_amount)) = CleanupDeposit::<T>::take(node) {
+                let _ = Self::release_cleanup_hold(&old_depositor, old_amount, ReleaseReason::Replaced);
+                T::Fungible::hold(
+                    &HoldReason::CleanupDeposit.into(),
+                    &to,
+                    old_amount,
+                ).map_err(|_| Error::<T>::InsufficientBalance)?;
+                CleanupDeposit::<T>::insert(node, (to.clone(), old_amount));
+            }
 
             T::Registry::transfer(&who, &to, node)?;
 
@@ -576,6 +731,19 @@ pub mod pallet {
             // name can be released through this extrinsic.
             let node = OwnerToPrimaryName::<T>::get(&caller)
                 .ok_or(Error::<T>::NoCanonicalName)?;
+
+            // Release the cleanup deposit back to the owner.
+            if let Some((depositor, amount)) = CleanupDeposit::<T>::take(node) {
+                let _ = Self::release_cleanup_hold(&depositor, amount, ReleaseReason::Released);
+            }
+
+            // Remove the expiry index entry.
+            if let Some(info) = RegistrarInfos::<T>::get(node) {
+                let deadline = info.expire
+                    .checked_add(&T::GracePeriod::get())
+                    .unwrap_or(info.expire);
+                ExpiryIndex::<T>::remove(deadline, node);
+            }
 
             OwnerToPrimaryName::<T>::remove(&caller);
             T::Registry::burn(caller, node)?;
@@ -753,15 +921,22 @@ pub mod pallet {
             let offer = OfferedNames::<T>::take(node).ok_or(Error::<T>::OfferedNameNotFound)?;
             ensure!(offer.recipient == caller, Error::<T>::NotOfferedNameRecipient);
 
-            // The RegistrarInfo must still be valid.
             let now = T::NowProvider::now();
+
+            // The 90-day offer window must not have expired.
+            ensure!(
+                offer.offered_at.checked_add(&T::OfferWindow::get()).map_or(false, |d| now < d),
+                Error::<T>::OfferExpired
+            );
+
+            // The RegistrarInfo must still be valid.
             let info = RegistrarInfos::<T>::get(node).ok_or(Error::<T>::NotExistOrOccupied)?;
             ensure!(now < info.expire, Error::<T>::NotUseable);
 
             // Caller must not already hold another canonical name.
             if let Some(existing_node) = OwnerToPrimaryName::<T>::get(&caller) {
                 let still_valid = RegistrarInfos::<T>::get(existing_node)
-                    .map(|i| now <= i.expire + T::GracePeriod::get())
+                    .map(|i| i.expire.checked_add(&T::GracePeriod::get()).map_or(false, |d| now <= d))
                     .unwrap_or(false);
                 if still_valid {
                     return Err(Error::<T>::AlreadyHasCanonicalName.into());
@@ -776,7 +951,7 @@ pub mod pallet {
             let parent_hash: [u8; 32] = polkadot_sdk::frame_system::Pallet::<T>::parent_hash()
                 .as_ref()
                 .try_into()
-                .unwrap_or([0u8; 32]);
+                .map_err(|_| Error::<T>::InternalHashConversion)?;
             T::OriginRecorder::record_origin(node, parent_hash)?;
 
             Self::deposit_event(Event::<T>::OfferedNameAccepted { node, recipient: caller });
@@ -814,20 +989,84 @@ pub mod pallet {
 
             Ok(())
         }
+
+        /// Clean up expired name registrations at a specific deadline.
+        /// Anyone can call this.
+        ///
+        /// The caller provides the `deadline` (expire + grace) they want to
+        /// clean up. This value is deterministic — emitted in registration
+        /// events and computable from on-chain data. The pallet validates
+        /// `deadline ≤ now`, then uses `iter_prefix(deadline)` to read only
+        /// the names at that deadline — O(batch size), not O(total names).
+        ///
+        /// Processes up to 5 entries per call. Releases the pallet-scoped
+        /// hold from each original registrant and transfers the freed funds
+        /// to the caller.
+        #[pallet::call_index(12)]
+        #[pallet::weight(T::WeightInfo::cleanup())]
+        #[polkadot_sdk::frame_support::transactional]
+        pub fn cleanup(origin: OriginFor<T>, deadline: T::Moment) -> DispatchResult {
+            let caller = ensure_signed(origin)?;
+            const MAX_CLEANUP_PER_CALL: usize = 5;
+
+            let now = T::NowProvider::now();
+            ensure!(deadline <= now, Error::<T>::NotExpired);
+
+            // Read only entries at this specific deadline — no full scan.
+            let expired: Vec<DomainHash> = ExpiryIndex::<T>::iter_prefix(deadline)
+                .take(MAX_CLEANUP_PER_CALL)
+                .map(|(node, _)| node)
+                .collect();
+
+            ensure!(!expired.is_empty(), Error::<T>::NotExpired);
+
+            let mut total_payout = BalanceOf::<T>::default();
+
+            for node in &expired {
+                if let Some((depositor, deposit_amount)) = CleanupDeposit::<T>::take(node) {
+                    let released = Self::release_cleanup_hold(
+                        &depositor, deposit_amount, ReleaseReason::Expired,
+                    );
+
+                    if !released.is_zero() {
+                        T::Currency::transfer(
+                            &depositor,
+                            &caller,
+                            released,
+                            ExistenceRequirement::AllowDeath,
+                        )?;
+                        total_payout = total_payout.saturating_add(released);
+                    }
+                }
+
+                if let Some(owner) = T::Registry::owner_of(*node) {
+                    if OwnerToPrimaryName::<T>::get(&owner) == Some(*node) {
+                        OwnerToPrimaryName::<T>::remove(&owner);
+                    }
+                }
+
+                let _ = T::Registry::force_delete(*node);
+                ExpiryIndex::<T>::remove(deadline, node);
+            }
+
+            Self::deposit_event(Event::<T>::NamesCleaned {
+                count: expired.len() as u32,
+                caller,
+                payout: total_payout,
+            });
+
+            Ok(())
+        }
     }
 }
 
-use crate::traits::{Label, Official, OriginRecorder, Registry};
+use crate::traits::Registry;
 use polkadot_sdk::frame_support::{
     dispatch::DispatchResult,
-    traits::{Currency, Get, Time},
+    traits::{Get, Time},
 };
-use polkadot_sdk::sp_runtime::{
-    traits::{CheckedAdd, SaturatedConversion, Zero},
-    ArithmeticError,
-};
+use polkadot_sdk::sp_runtime::traits::CheckedAdd;
 use polkadot_sdk::sp_weights::Weight;
-use polkadot_sdk::sp_std::vec::Vec;
 
 pub trait WeightInfo {
     fn offer_subdomain(len: u32) -> Weight;
@@ -842,6 +1081,7 @@ pub trait WeightInfo {
     fn add_reserved() -> Weight;
     fn remove_reserved() -> Weight;
     fn release_name() -> Weight;
+    fn cleanup() -> Weight;
 }
 
 impl<T: Config> crate::traits::Registrar for Pallet<T> {
@@ -856,7 +1096,7 @@ impl<T: Config> crate::traits::Registrar for Pallet<T> {
             .ok_or(Error::<T>::NotExistOrOccupied)?
             .expire;
 
-        polkadot_sdk::frame_support::ensure!(now > expire + T::GracePeriod::get(), Error::<T>::Occupied);
+        polkadot_sdk::frame_support::ensure!(expire.checked_add(&T::GracePeriod::get()).map_or(true, |d| now > d), Error::<T>::Occupied);
 
         Ok(())
     }
@@ -869,7 +1109,7 @@ impl<T: Config> crate::traits::Registrar for Pallet<T> {
             .expire;
 
         polkadot_sdk::frame_support::ensure!(
-            now < expire + T::GracePeriod::get(),
+            expire.checked_add(&T::GracePeriod::get()).map_or(false, |d| now < d),
             Error::<T>::NotRenewable
         );
 
@@ -898,94 +1138,6 @@ impl<T: Config> crate::traits::Registrar for Pallet<T> {
         })
     }
 
-    fn for_redeem_code(
-        name: Vec<u8>,
-        to: Self::AccountId,
-        duration: Self::Moment,
-        label: Label,
-    ) -> DispatchResult {
-        let official = T::Official::get_official_account()?;
-        let now = T::NowProvider::now();
-        let duration = duration.min(T::MaxRegistrationDuration::get());
-        let expire = now
-            .checked_add(&duration)
-            .ok_or(ArithmeticError::Overflow)?;
-        // 防止计算结果溢出
-        polkadot_sdk::frame_support::ensure!(
-            expire + T::GracePeriod::get() > now + T::GracePeriod::get(),
-            ArithmeticError::Overflow
-        );
-
-        // Enforce one name per address.
-        if let Some(existing_node) = OwnerToPrimaryName::<T>::get(&to) {
-            let still_valid = RegistrarInfos::<T>::get(existing_node)
-                .map(|info| now <= info.expire + T::GracePeriod::get())
-                .unwrap_or(false);
-            if still_valid {
-                return Err(Error::<T>::AlreadyHasCanonicalName.into());
-            }
-            OwnerToPrimaryName::<T>::remove(&to);
-        }
-        polkadot_sdk::frame_support::ensure!(
-            !T::Registry::has_active_subname(&to),
-            Error::<T>::AlreadyHoldsSubdomain
-        );
-
-        let base_node = T::BaseNode::get();
-        let label_node = label.encode_with_node(&base_node);
-
-        T::Registry::mint_subname(
-            &official,
-            base_node,
-            label_node,
-            to.clone(),
-            0,
-            |maybe_pre_owner| -> DispatchResult {
-                if let Some(pre_owner) = maybe_pre_owner {
-                    if OwnerToPrimaryName::<T>::get(pre_owner) == Some(label_node) {
-                        OwnerToPrimaryName::<T>::remove(pre_owner);
-                    }
-                }
-                let current_block = polkadot_sdk::frame_system::Pallet::<T>::block_number().saturated_into::<u32>();
-                RegistrarInfos::<T>::mutate(label_node, |info| -> DispatchResult {
-                    if let Some(info) = info.as_mut() {
-                        info.register_fee = Zero::zero();
-                        info.expire = expire;
-                        info.last_block = current_block;
-                    } else {
-                        let _ = info.insert(RegistrarInfoOf::<T> {
-                            register_fee: Zero::zero(),
-                            expire,
-                            capacity: T::DefaultCapacity::get(),
-                            label_len: name.len() as u32,
-                            last_block: current_block,
-                        });
-                    }
-                    Ok(())
-                })?;
-                Ok(())
-            },
-        )?;
-        // Record this as the recipient's canonical name.
-        OwnerToPrimaryName::<T>::insert(&to, label_node);
-
-        let parent_hash: [u8; 32] = polkadot_sdk::frame_system::Pallet::<T>::parent_hash()
-            .as_ref()
-            .try_into()
-            .unwrap_or([0u8; 32]);
-        T::OriginRecorder::record_origin(label_node, parent_hash)?;
-
-        Self::deposit_event(Event::<T>::NameRegistered {
-            name,
-            node: label_node,
-            owner: to,
-            expire,
-            fee: Zero::zero(),
-        });
-
-        Ok(())
-    }
-
     fn basenode() -> DomainHash {
         T::BaseNode::get()
     }
@@ -994,50 +1146,66 @@ impl<T: Config> crate::traits::Registrar for Pallet<T> {
         let Some(node) = OwnerToPrimaryName::<T>::get(account) else { return false };
         let now = T::NowProvider::now();
         RegistrarInfos::<T>::get(node)
-            .map(|info| now <= info.expire + T::GracePeriod::get())
+            .map(|info| info.expire.checked_add(&T::GracePeriod::get()).map_or(false, |d| now <= d))
             .unwrap_or(false)
     }
 }
 
 impl WeightInfo for () {
-    fn offer_subdomain(_len: u32) -> Weight { Weight::zero() }
-    fn accept_subdomain() -> Weight { Weight::zero() }
-    fn reject_subdomain() -> Weight { Weight::zero() }
-    fn revoke_subdomain() -> Weight { Weight::zero() }
-    fn release_subdomain() -> Weight { Weight::zero() }
-    fn accept_offered_name() -> Weight { Weight::zero() }
-
-    fn register(_len: u32) -> Weight {
-        Weight::zero()
-    }
-
-    fn renew() -> Weight {
-        Weight::zero()
-    }
-
-    fn transfer() -> Weight {
-        Weight::zero()
-    }
-
-    fn add_reserved() -> Weight {
-        Weight::zero()
-    }
-
-    fn remove_reserved() -> Weight {
-        Weight::zero()
-    }
-    fn release_name() -> Weight {
-        Weight::zero()
-    }
+    fn offer_subdomain(_len: u32) -> Weight { Weight::from_parts(500_000_000, 5_000) }
+    fn accept_subdomain() -> Weight { Weight::from_parts(500_000_000, 5_000) }
+    fn reject_subdomain() -> Weight { Weight::from_parts(200_000_000, 2_000) }
+    fn revoke_subdomain() -> Weight { Weight::from_parts(200_000_000, 2_000) }
+    fn release_subdomain() -> Weight { Weight::from_parts(200_000_000, 2_000) }
+    fn accept_offered_name() -> Weight { Weight::from_parts(500_000_000, 5_000) }
+    fn register(_len: u32) -> Weight { Weight::from_parts(500_000_000, 5_000) }
+    fn renew() -> Weight { Weight::from_parts(500_000_000, 5_000) }
+    fn transfer() -> Weight { Weight::from_parts(500_000_000, 5_000) }
+    fn add_reserved() -> Weight { Weight::from_parts(150_000_000, 500) }
+    fn remove_reserved() -> Weight { Weight::from_parts(150_000_000, 500) }
+    fn release_name() -> Weight { Weight::from_parts(500_000_000, 5_000) }
+    fn cleanup() -> Weight { Weight::from_parts(500_000_000, 5_000) }
 }
 
 impl<T: Config> Pallet<T> {
     pub fn get_info(id: DomainHash) -> Option<RegistrarInfoOf<T>> {
         RegistrarInfos::<T>::get(id)
     }
-    pub fn all() -> Vec<(DomainHash, RegistrarInfoOf<T>)> {
-        RegistrarInfos::<T>::iter().collect::<Vec<_>>()
+
+    /// Release a `CleanupDeposit` hold. Two permitted reasons:
+    ///
+    /// - `Expired`: the name is past expiry + grace. Used by cleanup().
+    /// - `Replaced`: the hold is being swapped for a fresh one during renew.
+    ///
+    /// Any other call path is a bug — this function is the single gate.
+    fn release_cleanup_hold(
+        depositor: &T::AccountId,
+        amount: BalanceOf<T>,
+        reason: ReleaseReason,
+    ) -> BalanceOf<T> {
+        use polkadot_sdk::frame_support::traits::tokens::{fungible::hold::Mutate, Precision};
+        match reason {
+            ReleaseReason::Expired | ReleaseReason::Replaced | ReleaseReason::Released => {
+                T::Fungible::release(
+                    &pallet::HoldReason::CleanupDeposit.into(),
+                    depositor,
+                    amount,
+                    Precision::BestEffort,
+                ).unwrap_or_default()
+            }
+        }
     }
+}
+
+/// Why the pallet is releasing a cleanup hold.
+enum ReleaseReason {
+    /// Name expired past grace — cleanup() is paying out to caller.
+    Expired,
+    /// Hold is being swapped: renew (new hold on same owner),
+    /// transfer (new hold on recipient), or marketplace sale.
+    Replaced,
+    /// Owner voluntarily released or burned the name. Deposit returned.
+    Released,
 }
 
 impl<T: Config> crate::traits::NameRegistry for Pallet<T> {
@@ -1056,7 +1224,7 @@ impl<T: Config> crate::traits::NameRegistry for Pallet<T> {
         if let Some(existing) = OwnerToPrimaryName::<T>::get(to) {
             let now = T::NowProvider::now();
             let still_valid = RegistrarInfos::<T>::get(existing)
-                .map(|info| now <= info.expire + T::GracePeriod::get())
+                .map(|info| info.expire.checked_add(&T::GracePeriod::get()).map_or(false, |d| now <= d))
                 .unwrap_or(false);
             if still_valid {
                 return Err(Error::<T>::AlreadyHasCanonicalName.into());
@@ -1075,6 +1243,10 @@ impl<T: Config> crate::traits::NameRegistry for Pallet<T> {
         Ok(())
     }
 
+    fn is_name_useable(node: DomainHash) -> bool {
+        <Self as crate::traits::Registrar>::check_expires_useable(node).is_ok()
+    }
+
     fn offer_bought_name(
         seller: &T::AccountId,
         buyer: &T::AccountId,
@@ -1090,7 +1262,7 @@ impl<T: Config> crate::traits::NameRegistry for Pallet<T> {
         if let Some(existing) = OwnerToPrimaryName::<T>::get(recipient) {
             let now = T::NowProvider::now();
             let still_valid = RegistrarInfos::<T>::get(existing)
-                .map(|info| now <= info.expire + T::GracePeriod::get())
+                .map(|info| info.expire.checked_add(&T::GracePeriod::get()).map_or(false, |d| now <= d))
                 .unwrap_or(false);
             polkadot_sdk::frame_support::ensure!(
                 !still_valid,
@@ -1113,12 +1285,14 @@ impl<T: Config> crate::traits::NameRegistry for Pallet<T> {
         }
         // Do NOT set recipient's OwnerToPrimaryName — that happens on acceptance.
 
-        // Record the pending offer.
+        // Record the pending offer with a 90-day acceptance window.
+        let offered_at = T::NowProvider::now();
         OfferedNames::<T>::insert(
             node,
             pns_types::OfferedNameRecord {
                 buyer: buyer.clone(),
                 recipient: recipient.clone(),
+                offered_at,
             },
         );
 
@@ -1127,6 +1301,56 @@ impl<T: Config> crate::traits::NameRegistry for Pallet<T> {
             buyer: buyer.clone(),
             recipient: recipient.clone(),
         });
+
+        Ok(())
+    }
+
+    fn charge_sale_fee(
+        buyer: &T::AccountId,
+        node: DomainHash,
+    ) -> polkadot_sdk::sp_runtime::DispatchResult {
+        use crate::traits::{BlockAuthor, PriceOracle};
+        use polkadot_sdk::frame_support::traits::{
+            Currency, Imbalance, ExistenceRequirement, WithdrawReasons,
+            tokens::fungible::hold::Mutate as HoldMutate,
+        };
+
+        let info = RegistrarInfos::<T>::get(node)
+            .ok_or(Error::<T>::NotExistOrOccupied)?;
+        let fee = T::PriceOracle::registration_fee(info.label_len as usize)
+            .ok_or(polkadot_sdk::sp_runtime::ArithmeticError::Overflow)?;
+
+        // Release the seller's old cleanup deposit back to them.
+        if let Some((old_depositor, old_amount)) = pallet::CleanupDeposit::<T>::take(node) {
+            let _ = Self::release_cleanup_hold(&old_depositor, old_amount, ReleaseReason::Replaced);
+        }
+
+        // Hold 5% on the buyer as the new cleanup deposit.
+        let deposit = fee / 20u32.into();
+        let spendable = fee - deposit;
+        T::Fungible::hold(
+            &pallet::HoldReason::CleanupDeposit.into(),
+            buyer,
+            deposit,
+        ).map_err(|_| Error::<T>::InsufficientBalance)?;
+        pallet::CleanupDeposit::<T>::insert(node, (buyer.clone(), deposit));
+
+        // Withdraw the remaining 95% and split.
+        let imbalance = T::Currency::withdraw(
+            buyer,
+            spendable,
+            WithdrawReasons::FEE,
+            ExistenceRequirement::KeepAlive,
+        )?;
+        use polkadot_sdk::sp_runtime::Perbill;
+        let author_share = Perbill::from_rational(40u32, 95u32) * spendable;
+        let (author_imbalance, org_imbalance) = imbalance.split(author_share);
+        T::Currency::resolve_creating(&T::PnsCustodian::get(), org_imbalance);
+        if let Some(author) = T::BlockAuthor::author() {
+            T::Currency::resolve_creating(&author, author_imbalance);
+        } else {
+            T::Currency::resolve_creating(&T::PnsCustodian::get(), author_imbalance);
+        }
 
         Ok(())
     }

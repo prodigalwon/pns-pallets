@@ -29,12 +29,11 @@ use frame_support::{
 	genesis_builder_helper::{build_state, get_preset},
 	weights::Weight,
 };
-use pallet_grandpa::AuthorityId as GrandpaId;
 use sp_api::impl_runtime_apis;
 use sp_consensus_aura::sr25519::AuthorityId as AuraId;
 use sp_core::{crypto::KeyTypeId, OpaqueMetadata};
 use sp_runtime::{
-	traits::{Block as BlockT, NumberFor},
+	traits::Block as BlockT,
 	transaction_validity::{TransactionSource, TransactionValidity},
 	ApplyExtrinsicResult,
 };
@@ -44,9 +43,10 @@ use sp_version::RuntimeVersion;
 // Local module imports
 use crate::InherentDataExt;
 use super::{
-	AccountId, Aura, Balance, Block, Executive, Grandpa, Nonce, Runtime,
+	AccountId, Aura, Balance, Block, Executive, Nonce, ParachainSystem, Runtime,
 	RuntimeCall, RuntimeGenesisConfig, SessionKeys, System, TransactionPayment, VERSION,
 };
+use super::configs::OfferWindow;
 
 impl_runtime_apis! {
 	impl sp_api::Core<Block> for Runtime {
@@ -142,33 +142,11 @@ impl_runtime_apis! {
 		}
 	}
 
-	impl sp_consensus_grandpa::GrandpaApi<Block> for Runtime {
-		fn grandpa_authorities() -> sp_consensus_grandpa::AuthorityList {
-			Grandpa::grandpa_authorities()
-		}
-
-		fn current_set_id() -> sp_consensus_grandpa::SetId {
-			Grandpa::current_set_id()
-		}
-
-		fn submit_report_equivocation_unsigned_extrinsic(
-			_equivocation_proof: sp_consensus_grandpa::EquivocationProof<
-				<Block as BlockT>::Hash,
-				NumberFor<Block>,
-			>,
-			_key_owner_proof: sp_consensus_grandpa::OpaqueKeyOwnershipProof,
-		) -> Option<()> {
-			None
-		}
-
-		fn generate_key_ownership_proof(
-			_set_id: sp_consensus_grandpa::SetId,
-			_authority_id: GrandpaId,
-		) -> Option<sp_consensus_grandpa::OpaqueKeyOwnershipProof> {
-			// NOTE: this is the only implementation possible since we've
-			// defined our key owner proof type as a bottom type (i.e. a type
-			// with no values).
-			None
+	impl cumulus_primitives_core::CollectCollationInfo<Block> for Runtime {
+		fn collect_collation_info(
+			header: &<Block as BlockT>::Header,
+		) -> cumulus_primitives_core::CollationInfo {
+			ParachainSystem::collect_collation_info(header)
 		}
 	}
 
@@ -293,9 +271,13 @@ impl_runtime_apis! {
 	impl pns_runtime_api::PnsStorageApi<Block, u64, Balance, AccountId> for Runtime {
 		fn get_info(id: pns_types::DomainHash) -> Option<pns_types::NameRecord<AccountId, u64, Balance>> {
 			use frame_support::traits::Time;
-			// Names in offered state are not yet active — return null until the recipient accepts.
-			if pns_registrar::registrar::OfferedNames::<Runtime>::contains_key(id) {
-				return None;
+			// Names in active offered state are not yet active — return null until the
+			// recipient accepts or the 90-day offer window expires.
+			if let Some(offer) = pns_registrar::registrar::OfferedNames::<Runtime>::get(id) {
+				let now = pallet_timestamp::Pallet::<Runtime>::now();
+				if now < offer.offered_at.saturating_add(OfferWindow::get()) {
+					return None;
+				}
 			}
 			let info = pns_registrar::registrar::Pallet::<Runtime>::get_info(id)?;
 			// Expired registrations resolve to None — the name is up for grabs.
@@ -314,9 +296,6 @@ impl_runtime_apis! {
 				read_block_number: 0,
 				read_block_hash: Default::default(),
 			})
-		}
-		fn all() -> Vec<(pns_types::DomainHash, pns_types::RegistrarInfo<u64, Balance>)> {
-			pns_registrar::registrar::Pallet::<Runtime>::all()
 		}
 		fn lookup(id: pns_types::DomainHash, record_types: Vec<pns_types::ddns::codec_type::RecordType>) -> Vec<(pns_types::ddns::codec_type::RecordType, Vec<u8>)> {
 			pns_resolvers::resolvers::Pallet::<Runtime>::lookup(id, record_types)
@@ -340,9 +319,13 @@ impl_runtime_apis! {
 			let (label, _) = Label::new_with_len(&name)?;
 			let base_node = pns_types::NATIVE_BASENODE;
 			let node = label.encode_with_node(&base_node);
-			// Names in offered state are not yet active — return null until the recipient accepts.
-			if pns_registrar::registrar::OfferedNames::<Runtime>::contains_key(node) {
-				return None;
+			// Names in active offered state are not yet active — return null until the
+			// recipient accepts or the 90-day offer window expires.
+			if let Some(offer) = pns_registrar::registrar::OfferedNames::<Runtime>::get(node) {
+				let now = pallet_timestamp::Pallet::<Runtime>::now();
+				if now < offer.offered_at.saturating_add(OfferWindow::get()) {
+					return None;
+				}
 			}
 			let info = pns_registrar::registrar::Pallet::<Runtime>::get_info(node)?;
 			// Expired registrations resolve to None — the name is up for grabs.
@@ -371,17 +354,25 @@ impl_runtime_apis! {
 			pns_registrar::registry::SubnameRecords::<Runtime>::get(node)
 		}
 		fn account_dashboard(owner: AccountId) -> pns_types::AccountDashboard {
+			use frame_support::traits::Time;
+			const MAX_ITEMS: usize = 200;
+			let now = pallet_timestamp::Pallet::<Runtime>::now();
+			let offer_window = OfferWindow::get();
 			let primary_name = pns_registrar::registrar::OwnerToPrimaryName::<Runtime>::get(&owner);
 			let subnames = pns_registrar::registry::AccountToSubnames::<Runtime>::iter_prefix(&owner)
 				.map(|(hash, _)| hash)
+				.take(MAX_ITEMS)
 				.collect();
 			let pending_subname_offers = pns_registrar::registry::OfferedToAccount::<Runtime>::iter_prefix(&owner)
 				.map(|(hash, _)| hash)
+				.take(MAX_ITEMS)
 				.collect();
 			let pending_name_offers = pns_registrar::registrar::OfferedNames::<Runtime>::iter()
 				.filter_map(|(node, record)| {
-					if record.recipient == owner { Some(node) } else { None }
+					let still_active = now < record.offered_at.saturating_add(offer_window);
+					if record.recipient == owner && still_active { Some(node) } else { None }
 				})
+				.take(MAX_ITEMS)
 				.collect();
 			pns_types::AccountDashboard {
 				primary_name,

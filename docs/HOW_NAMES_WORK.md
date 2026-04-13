@@ -94,7 +94,7 @@ A subdomain is a name like `charlie.alice.dot`. Alice (owner of `alice.dot`) cre
 - Accepting does not free the slot. Only revoking or releasing does.
 - Once all 10 slots are used up, Alice cannot send any more offers until she revokes some.
 
-This is intentional — it makes sending offers carry a real cost in attention and chain operations, not just fees.
+This is intentional to prevent spam — it makes sending offers carry a real cost in attention and chain operations, not just fees.
 
 ### Example
 

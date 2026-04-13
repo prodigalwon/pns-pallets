@@ -111,27 +111,17 @@ pub struct SubnameRecord<AccountId> {
 /// If the recipient calls `register` with `reject_offer` pointing to this name,
 /// the NFT is burned and the registration slot is freed.
 #[derive(Serialize, Deserialize, Encode, Decode, PartialEq, Eq, Clone, TypeInfo, MaxEncodedLen, Debug)]
-pub struct OfferedNameRecord<AccountId> {
+pub struct OfferedNameRecord<AccountId, Moment> {
     /// The account that purchased the name and funded the transaction.
     pub buyer: AccountId,
     /// The intended recipient who must accept or reject the name.
     pub recipient: AccountId,
+    /// Timestamp when the offer was created. The recipient has `OfferWindow` (90 days)
+    /// from this point to accept. After expiry the name becomes re-registrable.
+    pub offered_at: Moment,
 }
 
 /// Account-level summary returned by `pns_accountDashboard`.
-/// Aggregates all name portfolio data for an account in a single call.
-#[derive(Serialize, Deserialize, Encode, Decode, PartialEq, Eq, Clone, TypeInfo, Debug)]
-pub struct AccountDashboard {
-    /// Namehash of the canonical (primary) name registered to this account, or `None`.
-    pub primary_name: Option<DomainHash>,
-    /// Namehashes of all active subnames held by this account.
-    pub subnames: polkadot_sdk::sp_std::vec::Vec<DomainHash>,
-    /// Namehashes of pending subdomain offers awaiting acceptance by this account.
-    pub pending_subname_offers: polkadot_sdk::sp_std::vec::Vec<DomainHash>,
-    /// Namehashes of top-level name gift offers awaiting acceptance by this account.
-    pub pending_name_offers: polkadot_sdk::sp_std::vec::Vec<DomainHash>,
-}
-
 pub type DomainHash = sp_core::H256;
 
 /// Namehash of "dot" — the Polkadot TLD base node.

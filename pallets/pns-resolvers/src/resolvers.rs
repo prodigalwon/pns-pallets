@@ -63,6 +63,15 @@ pub mod pallet {
         ValueQuery,
     >;
 
+    #[pallet::storage]
+    pub type RecordCount<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        pns_types::DomainHash,
+        u32,
+        ValueQuery,
+    >;
+
     /// ddns record
     #[pallet::storage]
     pub type Records<T: Config> = StorageDoubleMap<
@@ -122,6 +131,9 @@ pub mod pallet {
         /// or unsupported format).  Use `"sub.domain"` for subdomains or `"domain"`
         /// for top-level names.
         InvalidName,
+        /// The record type is not in the set of user-settable types.
+        /// Only declared PNS attribute types are accepted.
+        InvalidRecordType,
     }
 
     impl<T: Config> Pallet<T> {
@@ -144,28 +156,15 @@ pub mod pallet {
         /// Additional types are fetched only if explicitly listed in `record_types`.
         ///
         /// The following types are blocked from `record_types` and silently dropped
-        /// if present — they are either auto-included, protocol-level DNS mechanism
-        /// records that are never stored per-name, or bulk transfer types:
-        ///   SS58, ORIGIN, ANY, AXFR, IXFR, OPT, TSIG, SIG, RRSIG,
-        ///   NSEC, NSEC3, NSEC3PARAM, DNSKEY, CDNSKEY, CDS, DS
+        /// if present — they are chain-managed proof anchors that are auto-included
+        /// in every response and cannot be set by users:
+        ///   SS58, ORIGIN
         pub fn lookup(node: pns_types::DomainHash, record_types: Vec<RecordType>) -> Vec<(RecordType, Vec<u8>)> {
+            const MAX_QUERY_TYPES: usize = 3;
+            let record_types: Vec<RecordType> = record_types.into_iter().take(MAX_QUERY_TYPES).collect();
             const BLOCKED: &[RecordType] = &[
-                RecordType::SS58,       // chain-managed, always returned unconditionally
-                RecordType::ORIGIN,     // chain-managed, always returned unconditionally
-                RecordType::ANY,        // bulk request — RFC 8482 deprecated
-                RecordType::AXFR,       // zone transfer
-                RecordType::IXFR,       // incremental zone transfer
-                RecordType::OPT,        // EDNS meta-record, not zone data
-                RecordType::TSIG,       // DNS transaction signature
-                RecordType::SIG,        // obsolete DNSSEC signature
-                RecordType::RRSIG,      // DNSSEC resource record signature
-                RecordType::NSEC,       // DNSSEC denial-of-existence
-                RecordType::NSEC3,      // DNSSEC denial-of-existence v3
-                RecordType::NSEC3PARAM, // DNSSEC NSEC3 parameters
-                RecordType::DNSKEY,     // DNSSEC zone signing key
-                RecordType::CDNSKEY,    // child DNSKEY
-                RecordType::CDS,        // child DS
-                RecordType::DS,         // delegation signer
+                RecordType::SS58,   // chain-managed, always returned unconditionally
+                RecordType::ORIGIN, // chain-managed, always returned unconditionally
             ];
 
             let mut results = Vec::new();
@@ -209,17 +208,29 @@ pub mod pallet {
             content: Content<T>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            // SS58 and ORIGIN are managed by the chain and serve as trust anchors;
-            // owners cannot overwrite them via this extrinsic.
+            const USER_SETTABLE: &[RecordType] = &[
+                RecordType::A, RecordType::AAAA, RecordType::CNAME, RecordType::TXT,
+                RecordType::RPC, RecordType::VALIDATOR, RecordType::PARA,
+                RecordType::PROXY, RecordType::PUBKEY1, RecordType::PUBKEY2,
+                RecordType::PUBKEY3, RecordType::AVATAR, RecordType::CONTRACT,
+                RecordType::IPFS, RecordType::CONTENT,
+            ];
             ensure!(
-                record_type != RecordType::SS58 && record_type != RecordType::ORIGIN,
-                Error::<T>::Ss58RecordProtected
+                USER_SETTABLE.contains(&record_type),
+                Error::<T>::InvalidRecordType
             );
             let node = Self::name_to_node(&name)?;
             ensure!(
                 T::RegistryChecker::check_node_useable(node, &who),
                 Error::<T>::InvalidPermission
             );
+            const MAX_RECORDS_PER_NAME: u32 = 20;
+            let is_update = Records::<T>::contains_key(node, record_type);
+            if !is_update {
+                let count = RecordCount::<T>::get(node);
+                ensure!(count < MAX_RECORDS_PER_NAME, Error::<T>::InvalidPermission);
+                RecordCount::<T>::insert(node, count.saturating_add(1));
+            }
             Records::<T>::insert(node, &record_type, &content);
             Self::deposit_event(Event::<T>::RecordsChanged {
                 node,
@@ -275,8 +286,8 @@ pub trait RegistryChecker {
 }
 
 impl WeightInfo for () {
-    fn set_text(_content_len: u32) -> Weight { Weight::zero() }
-    fn set_record(_content_len: u32) -> Weight { Weight::zero() }
+    fn set_text(_content_len: u32) -> Weight { Weight::from_parts(200_000_000, 2_000) }
+    fn set_record(_content_len: u32) -> Weight { Weight::from_parts(200_000_000, 2_000) }
 }
 
 impl<C: Config> Pallet<C> {
@@ -316,13 +327,18 @@ impl<C: Config> Pallet<C> {
     /// the previous owner.  `Texts` are intentionally left
     /// untouched — only `Records` entries are cleared here.
     pub fn clear_records_except_ss58(node: DomainHash) {
+        const MAX_CLEANUP: usize = 100;
         let to_remove: Vec<RecordType> = pallet::Records::<C>::iter_prefix(node)
             .filter(|(rt, _)| *rt != RecordType::SS58)
+            .take(MAX_CLEANUP)
             .map(|(rt, _)| rt)
             .collect();
+        let removed = to_remove.len() as u32;
         for rt in to_remove {
             pallet::Records::<C>::remove(node, rt);
         }
+        let current = pallet::RecordCount::<C>::get(node);
+        pallet::RecordCount::<C>::insert(node, current.saturating_sub(removed));
     }
 
     /// Remove ALL DNS records for `node` (Records and Texts).
@@ -330,7 +346,9 @@ impl<C: Config> Pallet<C> {
     /// Called when a domain is completely destroyed (e.g. a subname that is
     /// auto-cleared when its parent is transferred, released, or sold).
     pub fn clear_all_records(node: DomainHash) {
-        let _ = pallet::Records::<C>::clear_prefix(node, u32::MAX, None);
-        let _ = pallet::Texts::<C>::clear_prefix(node, u32::MAX, None);
+        const MAX_CLEANUP: u32 = 100;
+        let _ = pallet::Records::<C>::clear_prefix(node, MAX_CLEANUP, None);
+        let _ = pallet::Texts::<C>::clear_prefix(node, MAX_CLEANUP, None);
+        pallet::RecordCount::<C>::remove(node);
     }
 }

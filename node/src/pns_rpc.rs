@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
-use pns_types::{AccountDashboard, DomainHash, ListingInfo, NameRecord, RegistrarInfo};
+use pns_types::{AccountDashboard, DomainHash, ListingInfo, NameRecord};
 use sp_api::ProvideRuntimeApi;
 use sp_blockchain::HeaderBackend;
 use solochain_template_runtime::{AccountId, Balance, opaque::Block};
@@ -31,10 +31,6 @@ pub trait PnsStorageApi {
     /// `record_types` is a list of IANA type numbers (e.g. 1 = A, 28 = AAAA, 65280 = SS58).
     #[method(name = "pns_lookupByName")]
     fn lookup_by_name(&self, name: String, record_types: Vec<u32>) -> RpcResult<Vec<(u32, Vec<u8>)>>;
-
-    /// Return every registered name and its registrar info. Useful for indexers and explorers.
-    #[method(name = "pns_all")]
-    fn all(&self) -> RpcResult<Vec<(DomainHash, RegistrarInfo<u64, Balance>)>>;
 
     /// Return a full name portfolio summary for an account in a single call.
     /// Includes: primary name hash, active subname hashes, pending subdomain offer hashes,
@@ -75,6 +71,13 @@ where
     }
 
     fn resolve_name(&self, name: String) -> RpcResult<Option<NameRecord<AccountId, u64, Balance>>> {
+        if name.len() > 128 {
+            return Err(jsonrpsee::types::ErrorObject::owned(
+                jsonrpsee::types::error::INVALID_PARAMS_CODE,
+                "name too long",
+                None::<()>,
+            ));
+        }
         let chain = self.client.info();
         let api = self.client.runtime_api();
         api.resolve_name(chain.best_hash, name.into_bytes())
@@ -91,6 +94,13 @@ where
     }
 
     fn lookup(&self, node: DomainHash, record_types: Vec<u32>) -> RpcResult<Vec<(u32, Vec<u8>)>> {
+        if record_types.len() > 50 {
+            return Err(jsonrpsee::types::ErrorObject::owned(
+                jsonrpsee::types::error::INVALID_PARAMS_CODE,
+                "too many record types (max 50)",
+                None::<()>,
+            ));
+        }
         let api = self.client.runtime_api();
         let best = self.client.info().best_hash;
         let pns_types = record_types.into_iter()
@@ -108,6 +118,13 @@ where
     }
 
     fn get_listing(&self, name: String) -> RpcResult<Option<ListingInfo<AccountId, Balance, u64>>> {
+        if name.len() > 128 {
+            return Err(jsonrpsee::types::ErrorObject::owned(
+                jsonrpsee::types::error::INVALID_PARAMS_CODE,
+                "name too long",
+                None::<()>,
+            ));
+        }
         let chain = self.client.info();
         let api = self.client.runtime_api();
         api.get_listing(chain.best_hash, name.into_bytes())
@@ -124,6 +141,20 @@ where
     }
 
     fn lookup_by_name(&self, name: String, record_types: Vec<u32>) -> RpcResult<Vec<(u32, Vec<u8>)>> {
+        if name.len() > 128 {
+            return Err(jsonrpsee::types::ErrorObject::owned(
+                jsonrpsee::types::error::INVALID_PARAMS_CODE,
+                "name too long",
+                None::<()>,
+            ));
+        }
+        if record_types.len() > 50 {
+            return Err(jsonrpsee::types::ErrorObject::owned(
+                jsonrpsee::types::error::INVALID_PARAMS_CODE,
+                "too many record types (max 50)",
+                None::<()>,
+            ));
+        }
         let api = self.client.runtime_api();
         let best = self.client.info().best_hash;
         let pns_types = record_types.into_iter()
@@ -139,16 +170,6 @@ where
             let code = u16::from(hickory_proto::rr::RecordType::from(rt)) as u32;
             (code, data)
         }).collect())
-    }
-
-    fn all(&self) -> RpcResult<Vec<(DomainHash, RegistrarInfo<u64, Balance>)>> {
-        let api = self.client.runtime_api();
-        let best = self.client.info().best_hash;
-        api.all(best).map_err(|e| jsonrpsee::types::ErrorObject::owned(
-            jsonrpsee::types::error::INTERNAL_ERROR_CODE,
-            "Runtime error",
-            Some(format!("{:?}", e)),
-        ))
     }
 
     fn account_dashboard(&self, account: AccountId) -> RpcResult<AccountDashboard> {

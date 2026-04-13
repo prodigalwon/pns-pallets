@@ -7,7 +7,7 @@
 //! ## Introduction
 //!
 //! Most of the methods of this module are abstracted to higher-level
-//! domain name distribution calls (pns-registrar, pns-auction......).
+//! domain name distribution calls (pns-registrar).
 //! But there are still some methods for domain authority management.
 //!
 //! ### Module functions
@@ -26,7 +26,7 @@ pub mod pallet {
     use crate::{nft, traits::{OriginRecorder, Registrar, RecordCleaner, Ss58Updater}};
     use polkadot_sdk::frame_support::pallet_prelude::*;
     use polkadot_sdk::frame_support::traits::EnsureOrigin;
-    use polkadot_sdk::frame_system::{ensure_signed, pallet_prelude::*};
+    use polkadot_sdk::frame_system::pallet_prelude::*;
     use pns_types::{DomainHash, DomainTracing, Record};
     use polkadot_sdk::sp_runtime::traits::Zero;
     use polkadot_sdk::sp_std::vec::Vec;
@@ -184,19 +184,11 @@ pub mod pallet {
         /// The offer target already holds a name (canonical or subdomain).
         /// An account may hold at most one name at a time.
         TargetAlreadyOwnsName,
+        InternalHashConversion,
     }
 
     // helper
     impl<T: Config> Pallet<T> {
-        /// Resolve a human-readable name string to a [`DomainHash`].
-        ///
-        /// - `"sub.domain"` → namehash of subdomain `sub` under `domain.<tld>`.
-        /// - `"domain"` (no dot) → namehash of the top-level `domain.<tld>`.
-        fn name_to_node(name: &[u8]) -> Result<DomainHash, DispatchError> {
-            pns_types::parse_name_to_node(name, &T::Registrar::basenode())
-                .ok_or(Error::<T>::InvalidName.into())
-        }
-
         #[inline]
         pub fn verify(caller: &T::AccountId, node: DomainHash) -> DispatchResult {
             let owner = &nft::Pallet::<T>::tokens(T::ClassId::zero(), node)
@@ -266,6 +258,43 @@ pub mod pallet {
                 node: token,
                 owner: token_owner,
                 caller,
+            });
+            Ok(())
+        }
+
+        /// Delete a root-level name record from storage without ownership
+        /// checks. Clears subnames, RegistrarInfo, DNS records, and the
+        /// NFT token. No funds are touched — caller handles deposits.
+        pub(crate) fn do_force_delete(token: T::TokenId) -> DispatchResult {
+            let class_id = T::ClassId::zero();
+            let Some(token_info) = nft::Pallet::<T>::tokens(class_id, token) else {
+                return Err(Error::<T>::NotExist.into())
+            };
+            let token_owner = token_info.owner;
+
+            // Only root-level names can be cleaned up this way.
+            let Some(origin) = RuntimeOrigin::<T>::get(token) else {
+                return Err(Error::<T>::BanBurnBaseNode.into())
+            };
+            match origin {
+                DomainTracing::Root => {
+                    Self::clear_subnames(token);
+                    T::Registrar::clear_registrar_info(token, &token_owner)?;
+                    AccountToSubnames::<T>::remove(&token_owner, token);
+                }
+                _ => return Err(Error::<T>::NotExist.into()),
+            }
+
+            RuntimeOrigin::<T>::remove(token);
+            T::RecordCleaner::clear_all_records(token);
+            nft::Pallet::<T>::burn(&token_owner, (class_id, token))?;
+
+            Self::deposit_event(Event::<T>::TokenBurned {
+                class_id,
+                token_id: token,
+                node: token,
+                owner: token_owner.clone(),
+                caller: token_owner,
             });
             Ok(())
         }
@@ -378,7 +407,9 @@ pub mod pallet {
                 };
 
                 let node_children = info.data.children;
-                info.data.children = node_children + 1;
+                info.data.children = node_children
+                    .checked_add(1)
+                    .ok_or(polkadot_sdk::sp_runtime::ArithmeticError::Overflow)?;
                 Ok(())
             })
         }
@@ -393,7 +424,9 @@ pub mod pallet {
                 };
                 let node_children = info.data.children;
                 ensure!(node_children < capacity, Error::<T>::CapacityNotEnough);
-                info.data.children = node_children + 1;
+                info.data.children = node_children
+                    .checked_add(1)
+                    .ok_or(polkadot_sdk::sp_runtime::ArithmeticError::Overflow)?;
                 Ok(())
             })
         }
@@ -444,7 +477,7 @@ pub mod pallet {
             let parent_hash: [u8; 32] = polkadot_sdk::frame_system::Pallet::<T>::parent_hash()
                 .as_ref()
                 .try_into()
-                .unwrap_or([0u8; 32]);
+                .map_err(|_| Error::<T>::InternalHashConversion)?;
             T::OriginRecorder::record_origin(token, parent_hash)?;
 
             Self::deposit_event(Event::<T>::Transferred {
@@ -482,8 +515,10 @@ pub mod pallet {
         /// the root's children counter is reset to zero.
         fn clear_subnames(root_node: DomainHash) {
             let class_id = T::ClassId::zero();
+            const MAX_CHILDREN_PER_CLEANUP: usize = 100;
             let children: polkadot_sdk::sp_std::vec::Vec<DomainHash> =
                 SubNames::<T>::iter_prefix(root_node)
+                    .take(MAX_CHILDREN_PER_CLEANUP)
                     .map(|(child, _)| child)
                     .collect();
             for child in children {
@@ -506,7 +541,7 @@ pub mod pallet {
                     let _ = nft::Pallet::<T>::burn(&info.owner, (class_id, child));
                 }
             }
-            let _ = SubNames::<T>::clear_prefix(root_node, u32::MAX, None);
+            let _ = SubNames::<T>::clear_prefix(root_node, MAX_CHILDREN_PER_CLEANUP as u32, None);
             nft::Tokens::<T>::mutate(class_id, root_node, |data| {
                 if let Some(info) = data {
                     info.data.children = 0;
@@ -516,22 +551,6 @@ pub mod pallet {
     }
     #[pallet::call]
     impl<T: Config> Pallet<T> {
-        /// Burn a domain node.
-        ///
-        /// `name` accepts two forms:
-        /// - `"sub.domain"` — burns the subdomain `sub.domain.<tld>`.
-        /// - `"domain"` (no dot) — burns the top-level domain `domain.<tld>`.
-        ///
-        /// Ensure: The domain must have no active subdomains.
-        #[pallet::call_index(2)]
-        #[pallet::weight(T::WeightInfo::burn())]
-        pub fn burn(origin: OriginFor<T>, name: Vec<u8>) -> DispatchResult {
-            let caller = ensure_signed(origin)?;
-            let node = Self::name_to_node(&name)?;
-            Self::do_burn(caller, node)?;
-
-            Ok(())
-        }
         #[pallet::call_index(3)]
         #[pallet::weight(T::WeightInfo::set_official())]
         #[polkadot_sdk::frame_support::transactional]
@@ -567,7 +586,6 @@ use polkadot_sdk::frame_support::{
 };
 use pns_types::DomainHash;
 pub trait WeightInfo {
-    fn burn() -> Weight;
     fn set_official() -> Weight;
 }
 // TODO: replace litentry
@@ -579,7 +597,8 @@ impl<T: pallet::Config> crate::traits::NFT<T::AccountId> for pallet::Pallet<T> {
     type Balance = u128;
 
     fn balance(who: &T::AccountId) -> Self::Balance {
-        crate::nft::TokensByOwner::<T>::iter_prefix((who,)).count() as u128
+        const MAX_COUNT: usize = 10;
+        crate::nft::TokensByOwner::<T>::iter_prefix((who,)).take(MAX_COUNT).count() as u128
     }
 
     fn owner(token: (Self::ClassId, Self::TokenId)) -> Option<T::AccountId> {
@@ -628,7 +647,6 @@ impl<T: pallet::Config> crate::traits::Registry for pallet::Pallet<T> {
         )
     }
 
-    /// 方便后续判断权限
     fn available(caller: &Self::AccountId, node: DomainHash) -> DispatchResult {
         pallet::Pallet::<T>::verify(caller, node)
     }
@@ -645,6 +663,11 @@ impl<T: pallet::Config> crate::traits::Registry for pallet::Pallet<T> {
     #[polkadot_sdk::frame_support::require_transactional]
     fn burn(caller: Self::AccountId, node: DomainHash) -> DispatchResult {
         Self::do_burn(caller, node)
+    }
+
+    #[polkadot_sdk::frame_support::require_transactional]
+    fn force_delete(node: DomainHash) -> DispatchResult {
+        Self::do_force_delete(node)
     }
 
     fn has_active_subname(account: &Self::AccountId) -> bool {
@@ -804,11 +827,5 @@ impl<T: Config> crate::traits::Official for pallet::Pallet<T> {
 }
 
 impl WeightInfo for () {
-    fn burn() -> Weight {
-        Weight::zero()
-    }
-
-    fn set_official() -> Weight {
-        Weight::zero()
-    }
+    fn set_official() -> Weight { Weight::from_parts(150_000_000, 500) }
 }

@@ -17,10 +17,10 @@
 
 use crate::{AccountId, BalancesConfig, RuntimeGenesisConfig, SudoConfig};
 use alloc::{vec, vec::Vec};
+use cumulus_primitives_core::ParaId;
 use frame_support::build_struct_json_patch;
 use serde_json::Value;
 use sp_consensus_aura::sr25519::AuthorityId as AuraId;
-use sp_consensus_grandpa::AuthorityId as GrandpaId;
 use sp_genesis_builder::{self, PresetId};
 use sp_keyring::Sr25519Keyring;
 
@@ -29,9 +29,10 @@ const UNIT: u128 = 1_000_000_000_000;
 
 // Returns the genesis config presets populated with given parameters.
 fn testnet_genesis(
-	initial_authorities: Vec<(AuraId, GrandpaId)>,
+	initial_authorities: Vec<AuraId>,
 	endowed_accounts: Vec<AccountId>,
 	root: AccountId,
+	para_id: ParaId,
 ) -> Value {
 	build_struct_json_patch!(RuntimeGenesisConfig {
 		balances: BalancesConfig {
@@ -42,10 +43,11 @@ fn testnet_genesis(
 				.collect::<Vec<_>>(),
 		},
 		aura: pallet_aura::GenesisConfig {
-			authorities: initial_authorities.iter().map(|x| (x.0.clone())).collect::<Vec<_>>(),
+			authorities: initial_authorities,
 		},
-		grandpa: pallet_grandpa::GenesisConfig {
-			authorities: initial_authorities.iter().map(|x| (x.1.clone(), 1)).collect::<Vec<_>>(),
+		parachain_info: parachain_info::GenesisConfig {
+			parachain_id: para_id,
+			..Default::default()
 		},
 		sudo: SudoConfig { key: Some(root.clone()) },
 		// ---- PNS bootstrap ----
@@ -122,10 +124,7 @@ fn testnet_genesis(
 /// Return the development genesis config.
 pub fn development_config_genesis() -> Value {
 	testnet_genesis(
-		vec![(
-			sp_keyring::Sr25519Keyring::Alice.public().into(),
-			sp_keyring::Ed25519Keyring::Alice.public().into(),
-		)],
+		vec![sp_keyring::Sr25519Keyring::Alice.public().into()],
 		vec![
 			Sr25519Keyring::Alice.to_account_id(),
 			Sr25519Keyring::Bob.to_account_id(),
@@ -133,6 +132,7 @@ pub fn development_config_genesis() -> Value {
 			Sr25519Keyring::BobStash.to_account_id(),
 		],
 		sp_keyring::Sr25519Keyring::Alice.to_account_id(),
+		ParaId::from(1000),
 	)
 }
 
@@ -140,20 +140,15 @@ pub fn development_config_genesis() -> Value {
 pub fn local_config_genesis() -> Value {
 	testnet_genesis(
 		vec![
-			(
-				sp_keyring::Sr25519Keyring::Alice.public().into(),
-				sp_keyring::Ed25519Keyring::Alice.public().into(),
-			),
-			(
-				sp_keyring::Sr25519Keyring::Bob.public().into(),
-				sp_keyring::Ed25519Keyring::Bob.public().into(),
-			),
+			sp_keyring::Sr25519Keyring::Alice.public().into(),
+			sp_keyring::Sr25519Keyring::Bob.public().into(),
 		],
 		Sr25519Keyring::iter()
 			.filter(|v| v != &Sr25519Keyring::One && v != &Sr25519Keyring::Two)
 			.map(|v| v.to_account_id())
 			.collect::<Vec<_>>(),
 		Sr25519Keyring::Alice.to_account_id(),
+		ParaId::from(1000),
 	)
 }
 

@@ -7,13 +7,13 @@ pub mod pallet {
     use codec::{DecodeWithMemTracking, Encode, Decode, MaxEncodedLen};
     use polkadot_sdk::frame_support::{
         pallet_prelude::*,
-        traits::{Currency, ExistenceRequirement, Time, WithdrawReasons},
+        traits::{Currency, ExistenceRequirement, Time,
+                 tokens::fungible::hold::Mutate as HoldMutate},
     };
     use polkadot_sdk::frame_system::{ensure_signed, pallet_prelude::*};
-    use polkadot_sdk::sp_runtime::traits::{AtLeast32Bit, MaybeSerializeDeserialize};
+    use polkadot_sdk::sp_runtime::traits::{AtLeast32Bit, MaybeSerializeDeserialize, Zero};
     use pns_types::DomainHash;
     use pns_registrar::traits::{Label, NameRegistry, OriginRecorder, RecordCleaner, Ss58Updater};
-    use polkadot_sdk::sp_runtime::Saturating;
     use polkadot_sdk::sp_std::vec::Vec;
     use crate::WeightInfo;
     use scale_info::TypeInfo;
@@ -23,10 +23,28 @@ pub mod pallet {
 
     #[pallet::config]
     pub trait Config: polkadot_sdk::frame_system::Config {
-        /// The currency used for listing prices and protocol fees.
         type Currency: Currency<Self::AccountId>;
 
-        /// Moment type — millisecond timestamps, same unit as pallet_timestamp.
+        /// Composite hold reason. Must include this pallet's `HoldReason`.
+        type RuntimeHoldReason: From<HoldReason>;
+
+        /// Fungible hold interface for listing deposits.
+        type Fungible: HoldMutate<
+            Self::AccountId,
+            Reason = Self::RuntimeHoldReason,
+            Balance = BalanceOf<Self>,
+        >;
+
+        /// Amount held from the seller when creating a listing.
+        #[pallet::constant]
+        type ListingDeposit: Get<BalanceOf<Self>>;
+
+        /// How long after a listing expires before it becomes claimable
+        /// by anyone via `cleanup_listing()`. During this window only the
+        /// seller can reclaim via `cancel_listing()`.
+        #[pallet::constant]
+        type ListingGracePeriod: Get<Self::Moment>;
+
         type Moment: AtLeast32Bit
             + Parameter
             + Default
@@ -53,10 +71,6 @@ pub mod pallet {
         #[pallet::constant]
         type BaseNode: Get<DomainHash>;
 
-        /// Protocol fee in basis points (e.g. 200 = 2%). Burned from the seller's proceeds.
-        #[pallet::constant]
-        type ProtocolFeeBps: Get<u32>;
-
         type WeightInfo: WeightInfo;
     }
 
@@ -75,6 +89,14 @@ pub mod pallet {
     #[pallet::pallet]
     pub struct Pallet<T>(_);
 
+    /// Hold reasons scoped to this pallet.
+    #[pallet::composite_enum]
+    pub enum HoldReason {
+        /// Deposit held on the seller when creating a listing.
+        #[codec(index = 0)]
+        ListingDeposit,
+    }
+
     /// Active listings indexed by the name's namehash.
     #[pallet::storage]
     pub type Listings<T: Config> = StorageMap<
@@ -82,6 +104,17 @@ pub mod pallet {
         Blake2_128Concat,
         DomainHash,
         Listing<T::AccountId, BalanceOf<T>, T::Moment>,
+    >;
+
+    /// Listing deposit held on the seller. Tracks (seller, amount) per node.
+    /// Released on buy or cancel. Claimable by anyone after listing expiry
+    /// + grace period via `cleanup_listing()`.
+    #[pallet::storage]
+    pub type ListingDeposits<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        DomainHash,
+        (T::AccountId, BalanceOf<T>),
     >;
 
     #[pallet::event]
@@ -99,13 +132,19 @@ pub mod pallet {
             node: DomainHash,
             seller: T::AccountId,
         },
-        /// A name was sold. `fee` was burned; seller received `price - fee`.
+        /// A name was sold. Buyer paid the seller's asking price plus the
+        /// registration fee (charged separately by the registrar).
         Sold {
             node: DomainHash,
             seller: T::AccountId,
             buyer: T::AccountId,
             price: BalanceOf<T>,
-            fee: BalanceOf<T>,
+        },
+        /// An expired listing was cleaned up and its deposit paid to the caller.
+        ListingCleaned {
+            node: DomainHash,
+            caller: T::AccountId,
+            payout: BalanceOf<T>,
         },
         /// A name was purchased as a gift for `recipient` and is awaiting their acceptance.
         NameBoughtForRecipient {
@@ -114,7 +153,6 @@ pub mod pallet {
             buyer: T::AccountId,
             recipient: T::AccountId,
             price: BalanceOf<T>,
-            fee: BalanceOf<T>,
         },
     }
 
@@ -140,6 +178,11 @@ pub mod pallet {
         BuyerIsRecipient,
         /// The seller cannot be the gift recipient (no self-gifting).
         SellerIsRecipient,
+        InternalHashConversion,
+        /// Seller does not have enough free balance for the listing deposit.
+        InsufficientDeposit,
+        /// The listing has not expired past its grace period yet.
+        ListingNotExpired,
     }
 
     #[pallet::call]
@@ -161,7 +204,31 @@ pub mod pallet {
             ensure!(expires_at > now, Error::<T>::ExpiryNotInFuture);
             let node = T::NameRegistry::canonical_name(&who)
                 .ok_or(Error::<T>::NoCanonicalName)?;
-            ensure!(!Listings::<T>::contains_key(node), Error::<T>::AlreadyListed);
+            // Auto-clean stale listings where the previous seller no longer owns the name.
+            if let Some(existing) = Listings::<T>::get(node) {
+                if Some(existing.seller.clone()) == T::NameRegistry::owner_of(node) {
+                    return Err(Error::<T>::AlreadyListed.into());
+                }
+                // Stale listing — release old deposit if any.
+                if let Some((old_seller, old_deposit)) = ListingDeposits::<T>::take(node) {
+                    use polkadot_sdk::frame_support::traits::tokens::Precision;
+                    let _ = T::Fungible::release(
+                        &HoldReason::ListingDeposit.into(),
+                        &old_seller,
+                        old_deposit,
+                        Precision::BestEffort,
+                    );
+                }
+                Listings::<T>::remove(node);
+            }
+            // Hold listing deposit on the seller.
+            let deposit = T::ListingDeposit::get();
+            T::Fungible::hold(
+                &HoldReason::ListingDeposit.into(),
+                &who,
+                deposit,
+            ).map_err(|_| Error::<T>::InsufficientDeposit)?;
+            ListingDeposits::<T>::insert(node, (who.clone(), deposit));
             Listings::<T>::insert(node, Listing { seller: who.clone(), price, expires_at });
             Self::deposit_event(Event::<T>::Listed { node, seller: who, price, expires_at });
             Ok(())
@@ -175,19 +242,29 @@ pub mod pallet {
             let node = T::NameRegistry::canonical_name(&who)
                 .ok_or(Error::<T>::NoCanonicalName)?;
             ensure!(Listings::<T>::contains_key(node), Error::<T>::NotListed);
+            // Release the listing deposit back to the seller.
+            if let Some((seller, deposit)) = ListingDeposits::<T>::take(node) {
+                use polkadot_sdk::frame_support::traits::tokens::Precision;
+                let _ = T::Fungible::release(
+                    &HoldReason::ListingDeposit.into(),
+                    &seller,
+                    deposit,
+                    Precision::BestEffort,
+                );
+            }
             Listings::<T>::remove(node);
             Self::deposit_event(Event::<T>::Delisted { node, seller: who });
             Ok(())
         }
 
-        /// Purchase a listed name. The buyer passes the plain DNS label (e.g. `b"alice"`);
-        /// the pallet resolves it to the namehash internally. The buyer pays `listing.price`;
-        /// the protocol fee is burned from the seller's proceeds; the name NFT is transferred atomically.
+        /// Purchase a listed name. The buyer pays the seller's asking price
+        /// PLUS the full registration fee (based on label length). The
+        /// registration fee prevents hot-potato flipping to circumvent
+        /// short-name pricing — every transfer costs the same as a fresh
+        /// registration.
         ///
-        /// Pass `recipient = Some(account)` to buy the name as a gift for someone else.
-        /// The name enters an "offered" state — lookups return null — until the recipient
-        /// calls `accept_offered_name` on the registrar pallet. The recipient must not
-        /// already hold a canonical name or an active subdomain.
+        /// Pass `recipient = Some(account)` to buy the name as a gift.
+        /// The name enters an "offered" state until the recipient accepts.
         #[pallet::call_index(2)]
         #[pallet::weight(T::WeightInfo::buy_name())]
         #[polkadot_sdk::frame_support::transactional]
@@ -198,12 +275,32 @@ pub mod pallet {
             let listing = Listings::<T>::get(node).ok_or(Error::<T>::NotListed)?;
             ensure!(buyer != listing.seller, Error::<T>::BuyerIsSeller);
             ensure!(listing.expires_at > T::NowProvider::now(), Error::<T>::ListingExpired);
+            if Some(listing.seller.clone()) != T::NameRegistry::owner_of(node) {
+                // Stale listing — release the deposit back to the original seller.
+                if let Some((seller, deposit)) = ListingDeposits::<T>::take(node) {
+                    use polkadot_sdk::frame_support::traits::tokens::Precision;
+                    let _ = T::Fungible::release(
+                        &HoldReason::ListingDeposit.into(),
+                        &seller,
+                        deposit,
+                        Precision::BestEffort,
+                    );
+                }
+                Listings::<T>::remove(node);
+                return Err(Error::<T>::SellerNoLongerOwns.into());
+            }
+
             ensure!(
-                Some(listing.seller.clone()) == T::NameRegistry::owner_of(node),
-                Error::<T>::SellerNoLongerOwns
+                T::NameRegistry::is_name_useable(node),
+                Error::<T>::ListingExpired
             );
 
-            // Transfer full price from buyer to seller.
+            if let Some(ref recip) = recipient {
+                ensure!(*recip != buyer, Error::<T>::BuyerIsRecipient);
+                ensure!(*recip != listing.seller, Error::<T>::SellerIsRecipient);
+            }
+
+            // Pay the seller's asking price.
             T::Currency::transfer(
                 &buyer,
                 &listing.seller,
@@ -211,25 +308,24 @@ pub mod pallet {
                 ExistenceRequirement::KeepAlive,
             )?;
 
-            // Burn the protocol fee from the seller's proceeds.
-            let fee: BalanceOf<T> = listing.price
-                .saturating_mul(T::ProtocolFeeBps::get().into())
-                / 10_000u32.into();
-            let imbalance = T::Currency::withdraw(
-                &listing.seller,
-                fee,
-                WithdrawReasons::FEE,
-                ExistenceRequirement::KeepAlive,
-            )?;
-            drop(imbalance); // burned
+            // Charge the buyer the registration fee (5% hold + 40% author + 55% custodian).
+            // Releases the seller's old cleanup deposit back to them.
+            T::NameRegistry::charge_sale_fee(&buyer, node)?;
+
+            // Release the listing deposit back to the seller.
+            if let Some((seller, deposit)) = ListingDeposits::<T>::take(node) {
+                use polkadot_sdk::frame_support::traits::tokens::Precision;
+                let _ = T::Fungible::release(
+                    &HoldReason::ListingDeposit.into(),
+                    &seller,
+                    deposit,
+                    Precision::BestEffort,
+                );
+            }
 
             Listings::<T>::remove(node);
 
             if let Some(recip) = recipient {
-                // Gift purchase path: transfer to recipient in "offered" state.
-                ensure!(recip != buyer, Error::<T>::BuyerIsRecipient);
-                ensure!(recip != listing.seller, Error::<T>::SellerIsRecipient);
-
                 T::NameRegistry::offer_bought_name(&listing.seller, &buyer, &recip, node)?;
 
                 Self::deposit_event(Event::<T>::NameBoughtForRecipient {
@@ -238,19 +334,16 @@ pub mod pallet {
                     buyer,
                     recipient: recip,
                     price: listing.price,
-                    fee,
                 });
             } else {
-                // Standard purchase path: transfer directly to buyer.
                 T::NameRegistry::transfer_name(&listing.seller, &buyer, node)?;
 
-                // Clear stale DNS records from the seller, then write the buyer's SS58 and ORIGIN.
                 T::RecordCleaner::clear_records_except_ss58(node);
                 T::Ss58Updater::update_ss58(node, &buyer)?;
                 let parent_hash: [u8; 32] = polkadot_sdk::frame_system::Pallet::<T>::parent_hash()
                     .as_ref()
                     .try_into()
-                    .unwrap_or([0u8; 32]);
+                    .map_err(|_| Error::<T>::InternalHashConversion)?;
                 T::OriginRecorder::record_origin(node, parent_hash)?;
 
                 Self::deposit_event(Event::<T>::Sold {
@@ -258,9 +351,59 @@ pub mod pallet {
                     seller: listing.seller,
                     buyer,
                     price: listing.price,
-                    fee,
                 });
             }
+            Ok(())
+        }
+
+        /// Clean up an expired listing whose grace period has passed.
+        /// Anyone can call this. The listing deposit is released from the
+        /// seller and transferred to the caller.
+        #[pallet::call_index(3)]
+        #[pallet::weight(T::WeightInfo::cleanup_listing())]
+        #[polkadot_sdk::frame_support::transactional]
+        pub fn cleanup_listing(origin: OriginFor<T>, name: Vec<u8>) -> DispatchResult {
+            let caller = ensure_signed(origin)?;
+            let label = Label::new(&name).ok_or(Error::<T>::InvalidName)?;
+            let node = label.encode_with_node(&T::BaseNode::get());
+
+            let listing = Listings::<T>::get(node).ok_or(Error::<T>::NotListed)?;
+            let now = T::NowProvider::now();
+
+            // Must be past listing expiry + grace period.
+            use polkadot_sdk::sp_runtime::traits::CheckedAdd;
+            let deadline = listing.expires_at
+                .checked_add(&T::ListingGracePeriod::get())
+                .unwrap_or(listing.expires_at);
+            ensure!(now > deadline, Error::<T>::ListingNotExpired);
+
+            // Release the deposit and pay the cleanup caller.
+            if let Some((seller, deposit)) = ListingDeposits::<T>::take(node) {
+                use polkadot_sdk::frame_support::traits::tokens::Precision;
+                let released = T::Fungible::release(
+                    &HoldReason::ListingDeposit.into(),
+                    &seller,
+                    deposit,
+                    Precision::BestEffort,
+                ).unwrap_or_default();
+
+                if !released.is_zero() {
+                    T::Currency::transfer(
+                        &seller,
+                        &caller,
+                        released,
+                        ExistenceRequirement::AllowDeath,
+                    )?;
+                }
+
+                Self::deposit_event(Event::<T>::ListingCleaned {
+                    node,
+                    caller,
+                    payout: released,
+                });
+            }
+
+            Listings::<T>::remove(node);
             Ok(())
         }
     }
@@ -273,12 +416,14 @@ pub trait WeightInfo {
     fn create_listing() -> Weight;
     fn cancel_listing() -> Weight;
     fn buy_name() -> Weight;
+    fn cleanup_listing() -> Weight;
 }
 
 impl WeightInfo for () {
-    fn create_listing() -> Weight { Weight::zero() }
-    fn cancel_listing() -> Weight { Weight::zero() }
-    fn buy_name() -> Weight { Weight::zero() }
+    fn create_listing() -> Weight { Weight::from_parts(200_000_000, 2_000) }
+    fn cancel_listing() -> Weight { Weight::from_parts(200_000_000, 2_000) }
+    fn buy_name() -> Weight { Weight::from_parts(500_000_000, 5_000) }
+    fn cleanup_listing() -> Weight { Weight::from_parts(500_000_000, 5_000) }
 }
 
 impl<T: Config> Pallet<T> {

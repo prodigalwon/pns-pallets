@@ -1,14 +1,20 @@
 use codec::{Encode, FullCodec};
 use core::fmt::Debug;
 use polkadot_sdk::frame_support::traits::Currency;
+use polkadot_sdk::sp_std::vec::Vec;
 use pns_types::DomainHash;
+
+pub trait BlockAuthor {
+    type AccountId;
+    fn author() -> Option<Self::AccountId>;
+}
 
 use polkadot_sdk::sp_io::hashing::keccak_256;
 use polkadot_sdk::sp_runtime::{
     traits::{AtLeast32BitUnsigned, MaybeSerializeDeserialize},
     DispatchError, DispatchResult,
 };
-use polkadot_sdk::sp_std::vec::Vec;
+
 
 pub trait Registrar {
     type Balance;
@@ -18,19 +24,12 @@ pub trait Registrar {
     fn check_expires_renewable(node: DomainHash) -> DispatchResult;
     fn check_expires_useable(node: DomainHash) -> DispatchResult;
     fn clear_registrar_info(node: DomainHash, owner: &Self::AccountId) -> DispatchResult;
-    fn for_redeem_code(
-        name: Vec<u8>,
-        to: Self::AccountId,
-        duration: Self::Moment,
-        label: Label,
-    ) -> DispatchResult;
     fn basenode() -> DomainHash;
     /// Returns `true` if `account` currently holds a valid (non-expired, within grace period)
     /// canonical name. Used by the registry to guard subdomain acceptance.
     fn has_valid_canonical_name(account: &Self::AccountId) -> bool;
 }
 
-/// 登记表
 pub trait Registry: NFT<Self::AccountId> {
     type AccountId;
 
@@ -46,6 +45,11 @@ pub trait Registry: NFT<Self::AccountId> {
     fn owner_of(node: DomainHash) -> Option<Self::AccountId>;
     fn transfer(from: &Self::AccountId, to: &Self::AccountId, node: DomainHash) -> DispatchResult;
     fn burn(caller: Self::AccountId, node: DomainHash) -> DispatchResult;
+
+    /// Delete a name record and all its subnames from storage without
+    /// ownership checks. No funds are burned — this only removes chain
+    /// state. Used by cleanup() on expired registrations.
+    fn force_delete(node: DomainHash) -> DispatchResult;
 
     /// Returns `true` if `account` currently holds at least one active subdomain.
     /// Used by the registrar to block canonical name registration/transfer to accounts
@@ -123,11 +127,19 @@ pub trait NameRegistry {
         recipient: &Self::AccountId,
         node: DomainHash,
     ) -> DispatchResult;
+    /// Returns true if the name is currently valid (not expired, not in grace).
+    fn is_name_useable(node: DomainHash) -> bool;
+    /// Charge the registration fee for a marketplace sale. The buyer pays
+    /// the same fee as a fresh registration (based on label length): 5% held
+    /// on buyer as cleanup deposit, 40% to block author, 55% to PnsCustodian.
+    /// Releases the seller's old cleanup deposit back to them.
+    fn charge_sale_fee(
+        buyer: &Self::AccountId,
+        node: DomainHash,
+    ) -> DispatchResult;
 }
 
-// 客户
 pub trait Customer<AccountId> {
-    // 客户使用的货币
     type Currency: Currency<AccountId>;
 }
 
@@ -249,13 +261,8 @@ impl Label {
         DomainHash::from(keccak_256(encoded))
     }
 }
-// TODO: (暂不支持中文域名)
-// 域名不区分大小写和简繁体。
-// 域名的合法长度为1~63个字符（域名主体，不包括后缀）。
-// 英文域名合法字符为a-z、0-9、短划线（-）。
-// （ 说明 短划线（-）不能出现在开头和结尾以及在第三和第四字符位置。）
-// 中文域名除英文域名合法字符外，必须含有至少一个汉字（简体或繁体），计算中文域名字符长度以转换后的punycode码为准。
-// 不支持xn—开头的请求参数（punycode码），请以中文域名作为请求参数。
+// Chinese domain names: deferred to mainnet.
+// Labels are case-insensitive, ASCII alphanumeric only (a-z, 0-9), 1-63 bytes.
 pub fn check_label(label: &[u8]) -> Option<()> {
     let label = core::str::from_utf8(label)
         .map(|label| label.to_ascii_lowercase())
@@ -272,15 +279,10 @@ pub fn check_label(label: &[u8]) -> Option<()> {
     Some(())
 }
 pub trait Available {
-    fn is_anctionable(&self) -> bool;
     fn is_registrable(&self) -> bool;
 }
 
 impl Available for usize {
-    fn is_anctionable(&self) -> bool {
-        *self >= 1 && *self < MIN_REGISTRABLE_LEN
-    }
-
     fn is_registrable(&self) -> bool {
         *self >= MIN_REGISTRABLE_LEN
     }

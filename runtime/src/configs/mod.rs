@@ -42,7 +42,7 @@ use sp_version::RuntimeVersion;
 
 // Local module imports
 use super::{
-	AccountId, Aura, Balance, Balances, Block, BlockNumber, Hash, Nonce,
+	AccountId, Balance, Balances, Block, BlockNumber, Hash, Nonce,
 	PalletInfo, Runtime, RuntimeCall, RuntimeEvent, RuntimeFreezeReason, RuntimeHoldReason,
 	RuntimeOrigin, RuntimeTask, System, Timestamp, DAYS, EXISTENTIAL_DEPOSIT, MILLI_SECS_PER_BLOCK,
 	SLOT_DURATION, VERSION,
@@ -101,7 +101,23 @@ impl frame_system::Config for Runtime {
 	type SS58Prefix = SS58Prefix;
 	type MaxConsumers = frame_support::traits::ConstU32<16>;
 	type SingleBlockMigrations = SingleBlockMigrations;
+	/// Required by cumulus_pallet_parachain_system — the solochain default is `()`.
+	type OnSetCode = cumulus_pallet_parachain_system::ParachainSetCode<Self>;
 }
+
+/// Relay chain slot duration in milliseconds (Paseo / Polkadot = 6 s).
+pub const RELAY_CHAIN_SLOT_DURATION_MILLIS: u32 = 6000;
+/// Number of parachain blocks produced per relay-chain block.
+pub const BLOCK_PROCESSING_VELOCITY: u32 = 1;
+/// How many unincluded parachain blocks can be in the pipeline.
+pub const UNINCLUDED_SEGMENT_CAPACITY: u32 = 1;
+
+pub type ConsensusHook = cumulus_pallet_aura_ext::FixedVelocityConsensusHook<
+	Runtime,
+	RELAY_CHAIN_SLOT_DURATION_MILLIS,
+	BLOCK_PROCESSING_VELOCITY,
+	UNINCLUDED_SEGMENT_CAPACITY,
+>;
 
 impl pallet_aura::Config for Runtime {
 	type AuthorityId = AuraId;
@@ -111,25 +127,74 @@ impl pallet_aura::Config for Runtime {
 	type SlotDuration = pallet_aura::MinimumPeriodTimesTwo<Runtime>;
 }
 
-impl pallet_grandpa::Config for Runtime {
-	type RuntimeEvent = RuntimeEvent;
-
-	type WeightInfo = ();
-	type MaxAuthorities = ConstU32<32>;
-	type MaxNominators = ConstU32<0>;
-	type MaxSetIdSessionEntries = ConstU64<0>;
-
-	type KeyOwnerProof = sp_core::Void;
-	type EquivocationReportSystem = ();
-}
+impl cumulus_pallet_aura_ext::Config for Runtime {}
 
 impl pallet_timestamp::Config for Runtime {
-	/// A timestamp: milliseconds since the unix epoch.
+	/// Timestamps are provided by the relay-chain inherent in a parachain.
 	type Moment = u64;
-	type OnTimestampSet = Aura;
+	type OnTimestampSet = ();
 	type MinimumPeriod = ConstU64<{ SLOT_DURATION / 2 }>;
 	type WeightInfo = ();
 }
+
+parameter_types! {
+	pub const ReservedXcmpWeight: Weight = Weight::zero();
+	pub const ReservedDmpWeight: Weight = Weight::zero();
+	pub MessageQueueServiceWeight: Weight = Weight::zero();
+}
+
+/// Drop all downward / XCMP messages — PNS does not use XCM.
+pub struct DropAllMessages;
+impl frame_support::traits::ProcessMessage for DropAllMessages {
+	type Origin = cumulus_primitives_core::AggregateMessageOrigin;
+	fn process_message(
+		_message: &[u8],
+		_origin: Self::Origin,
+		_meter: &mut frame_support::weights::WeightMeter,
+		_id: &mut [u8; 32],
+	) -> Result<bool, frame_support::traits::ProcessMessageError> {
+		Ok(false)
+	}
+}
+
+impl pallet_message_queue::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type WeightInfo = ();
+	type MessageProcessor = DropAllMessages;
+	type Size = u32;
+	type QueueChangeHandler = ();
+	type QueuePausedQuery = ();
+	type HeapSize = ConstU32<{ 64 * 1024 }>;
+	type MaxStale = ConstU32<8>;
+	type ServiceWeight = MessageQueueServiceWeight;
+	type IdleMaxServiceWeight = MessageQueueServiceWeight;
+}
+
+parameter_types! {
+	pub const RelayOrigin: cumulus_primitives_core::AggregateMessageOrigin =
+		cumulus_primitives_core::AggregateMessageOrigin::Parent;
+}
+
+impl cumulus_pallet_parachain_system::Config for Runtime {
+	type WeightInfo = ();
+	type RuntimeEvent = RuntimeEvent;
+	type OnSystemEvent = ();
+	type SelfParaId = parachain_info::Pallet<Runtime>;
+	type OutboundXcmpMessageSource = ();
+	type DmpQueue = frame_support::traits::EnqueueWithOrigin<
+		pallet_message_queue::Pallet<Runtime>,
+		RelayOrigin,
+	>;
+	type ReservedXcmpWeight = ReservedXcmpWeight;
+	type XcmpMessageHandler = ();
+	type ReservedDmpWeight = ReservedDmpWeight;
+	type CheckAssociatedRelayNumber =
+		cumulus_pallet_parachain_system::RelayNumberMonotonicallyIncreases;
+	type ConsensusHook = ConsensusHook;
+	type RelayParentOffset = frame_support::traits::ConstU32<0>;
+}
+
+impl parachain_info::Config for Runtime {}
 
 impl pallet_balances::Config for Runtime {
 	type MaxLocks = ConstU32<50>;
@@ -206,6 +271,7 @@ impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for EnsureRootAsAccountI
 
 parameter_types! {
     pub const GracePeriod: u64 = 30 * DAYS as u64 * MILLI_SECS_PER_BLOCK;
+    pub const OfferWindow: u64 = 90 * DAYS as u64 * MILLI_SECS_PER_BLOCK;
     pub const DefaultCapacity: u32 = 10;
     pub const MinRegistrationDuration: u64 = 28 * DAYS as u64 * MILLI_SECS_PER_BLOCK;
     pub const MaxRegistrationDuration: u64 = 365 * DAYS as u64 * MILLI_SECS_PER_BLOCK;
@@ -303,6 +369,7 @@ impl pns_registrar::registrar::Config for Runtime {
     type BaseNode = BaseNode;
     type MinRegistrationDuration = MinRegistrationDuration;
     type MaxRegistrationDuration = MaxRegistrationDuration;
+    type OfferWindow = OfferWindow;
     type WeightInfo = ();
     type PriceOracle = pns_registrar::price_oracle::Pallet<Runtime>;
     type ManagerOrigin = EnsureRootAsAccountId;
