@@ -787,6 +787,7 @@ impl<T: pallet::Config> crate::traits::Registry for pallet::Pallet<T> {
         let record = pallet::SubnameRecords::<T>::take(label_node)
             .ok_or(pallet::Error::<T>::SubnameNotFound)?;
         ensure!(record.parent == parent, pallet::Error::<T>::NotSubnameOfferer);
+        let class_id = T::ClassId::zero();
         match record.state {
             pns_types::SubnameState::Offered | pns_types::SubnameState::Rejected => {
                 pallet::OfferedToAccount::<T>::remove(&record.target, label_node);
@@ -794,10 +795,16 @@ impl<T: pallet::Config> crate::traits::Registry for pallet::Pallet<T> {
             pns_types::SubnameState::Active => {
                 pallet::AccountToSubnames::<T>::remove(&record.target, label_node);
                 T::RecordCleaner::clear_all_records(label_node);
+                // Burn the canonical NFT minted at accept-time (M1
+                // fix). Without this, the NFT leaks on revoke — the
+                // subname is removed from every tracking index but
+                // `nft::Tokens[0, label_node]` would still show the
+                // old holder as owner. Also cleans up RuntimeOrigin.
+                let _ = crate::nft::Pallet::<T>::burn(&record.target, (class_id, label_node));
+                pallet::RuntimeOrigin::<T>::remove(label_node);
             }
         }
         pallet::SubNames::<T>::remove(parent, label_node);
-        let class_id = T::ClassId::zero();
         Self::sub_children(parent, class_id)?;
         Ok(())
     }
@@ -819,6 +826,10 @@ impl<T: pallet::Config> crate::traits::Registry for pallet::Pallet<T> {
         let class_id = T::ClassId::zero();
         Self::sub_children(record.parent, class_id)?;
         T::RecordCleaner::clear_all_records(label_node);
+        // Burn the canonical NFT minted at accept-time (M1 fix).
+        // Without this the NFT leaks on voluntary release.
+        let _ = crate::nft::Pallet::<T>::burn(by, (class_id, label_node));
+        pallet::RuntimeOrigin::<T>::remove(label_node);
         Ok(record.parent)
     }
 
