@@ -2,6 +2,8 @@
 
 pub use pallet::*;
 
+pub mod marketplace_weights;
+
 #[polkadot_sdk::frame_support::pallet]
 pub mod pallet {
     use codec::{DecodeWithMemTracking, Encode, Decode, MaxEncodedLen};
@@ -429,5 +431,129 @@ impl<T: Config> Pallet<T> {
     /// Returns the active listing for `node`, if any.
     pub fn listing(node: DomainHash) -> Option<Listing<T::AccountId, BalanceOf<T>, T::Moment>> {
         pallet::Listings::<T>::get(node)
+    }
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+#[polkadot_sdk::frame_benchmarking::v2::benchmarks(
+    where T: pns_registrar::registrar::Config + polkadot_sdk::pallet_timestamp::Config<Moment = <T as pallet::Config>::Moment>,
+)]
+mod benchmarks {
+    use super::*;
+    use polkadot_sdk::frame_benchmarking::v2::*;
+    use polkadot_sdk::frame_support::traits::{Currency, Get};
+    use polkadot_sdk::frame_system::RawOrigin;
+    use polkadot_sdk::sp_runtime::{traits::SaturatedConversion, traits::One};
+
+    /// Fund + register a canonical name for the caller.
+    fn setup_owner<T>(caller: &T::AccountId, name: &[u8])
+    where
+        T: pns_registrar::registrar::Config,
+    {
+        let big: pns_registrar::registrar::BalanceOf<T> =
+            (u128::MAX / 2).saturated_into();
+        <T as pns_registrar::registrar::Config>::Currency::make_free_balance_be(caller, big);
+        pns_registrar::registrar::Pallet::<T>::register(
+            RawOrigin::Signed(caller.clone()).into(),
+            name.to_vec(),
+            None,
+        )
+        .expect("register bench setup");
+    }
+
+    fn bench_price<T: pallet::Config>() -> BalanceOf<T> {
+        1_000_000_000_000u128.saturated_into()
+    }
+
+    /// Moment 10 days from now — comfortably inside the listing window
+    /// but also past any `now == expires_at` boundary checks in tests.
+    fn future_moment<T>() -> <T as pallet::Config>::Moment
+    where
+        T: pallet::Config + polkadot_sdk::pallet_timestamp::Config<Moment = <T as pallet::Config>::Moment>,
+    {
+        let now = polkadot_sdk::pallet_timestamp::Now::<T>::get();
+        let ten_days: u64 = 10 * 86_400_000;
+        now + ten_days.saturated_into()
+    }
+
+    #[benchmark]
+    fn create_listing() {
+        let caller: T::AccountId = whitelisted_caller();
+        setup_owner::<T>(&caller, b"listbench");
+
+        let price = bench_price::<T>();
+        let exp = future_moment::<T>();
+
+        #[extrinsic_call]
+        _(RawOrigin::Signed(caller), price, exp);
+    }
+
+    #[benchmark]
+    fn cancel_listing() {
+        let caller: T::AccountId = whitelisted_caller();
+        setup_owner::<T>(&caller, b"cancelbench");
+        let price = bench_price::<T>();
+        let exp = future_moment::<T>();
+        Pallet::<T>::create_listing(
+            RawOrigin::Signed(caller.clone()).into(),
+            price,
+            exp,
+        )
+        .expect("create_listing bench setup");
+
+        #[extrinsic_call]
+        _(RawOrigin::Signed(caller));
+    }
+
+    #[benchmark]
+    fn buy_name() {
+        let seller: T::AccountId = whitelisted_caller();
+        setup_owner::<T>(&seller, b"buybench");
+        let price = bench_price::<T>();
+        let exp = future_moment::<T>();
+        Pallet::<T>::create_listing(
+            RawOrigin::Signed(seller.clone()).into(),
+            price,
+            exp,
+        )
+        .expect("create_listing bench setup");
+
+        let buyer: T::AccountId = account("buyer", 0, 0);
+        let big: pns_registrar::registrar::BalanceOf<T> =
+            (u128::MAX / 2).saturated_into();
+        <T as pns_registrar::registrar::Config>::Currency::make_free_balance_be(&buyer, big);
+
+        #[extrinsic_call]
+        _(RawOrigin::Signed(buyer), b"buybench".to_vec(), None);
+    }
+
+    #[benchmark]
+    fn cleanup_listing() {
+        let seller: T::AccountId = whitelisted_caller();
+        setup_owner::<T>(&seller, b"cleanbench");
+
+        // Short listing window — 1 ms past `now` — so advancing time
+        // past grace is cheap.
+        let now = polkadot_sdk::pallet_timestamp::Now::<T>::get();
+        let short_exp: <T as pallet::Config>::Moment =
+            now + <<T as pallet::Config>::Moment as One>::one();
+        Pallet::<T>::create_listing(
+            RawOrigin::Signed(seller.clone()).into(),
+            bench_price::<T>(),
+            short_exp,
+        )
+        .expect("create_listing bench setup");
+
+        // Advance past expires_at + ListingGracePeriod.
+        let grace = <T as pallet::Config>::ListingGracePeriod::get();
+        let advanced: <T as polkadot_sdk::pallet_timestamp::Config>::Moment = short_exp
+            + grace
+            + <<T as pallet::Config>::Moment as One>::one();
+        polkadot_sdk::pallet_timestamp::Now::<T>::put(advanced);
+
+        let caller: T::AccountId = account("reaper", 0, 0);
+
+        #[extrinsic_call]
+        _(RawOrigin::Signed(caller), b"cleanbench".to_vec());
     }
 }

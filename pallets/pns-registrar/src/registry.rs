@@ -861,3 +861,39 @@ impl<T: Config> crate::traits::Official for pallet::Pallet<T> {
 impl WeightInfo for () {
     fn set_official() -> Weight { Weight::from_parts(150_000_000, 500) }
 }
+
+#[cfg(feature = "runtime-benchmarks")]
+#[polkadot_sdk::frame_benchmarking::v2::benchmarks]
+mod benchmarks {
+    use super::*;
+    use polkadot_sdk::frame_benchmarking::v2::*;
+    use polkadot_sdk::frame_system::RawOrigin;
+    use crate::traits::Registrar;
+
+    #[benchmark]
+    fn set_official() {
+        // The dev chain genesis seeds the basenode NFT to the initial
+        // official (Alice) and the `Official` storage slot. This
+        // benchmark hands the role off to a fresh account, exercising
+        // both the storage swap and the NFT transfer in the extrinsic.
+        // Running under runtime-benchmarks with the test-attestation
+        // feature picks up the paseo dev genesis state.
+        let new_official: T::AccountId = whitelisted_caller();
+        let basenode = <T as pallet::Config>::Registrar::basenode();
+        // Precondition sanity: if genesis hasn't seeded Official (e.g. a
+        // runtime without PNS dev genesis), install the current owner
+        // from NFT state so the transfer branch still executes.
+        if pallet::Official::<T>::get().is_none() {
+            use polkadot_sdk::sp_runtime::traits::Zero;
+            let class_id = T::ClassId::zero();
+            if let Some(token) = crate::nft::Tokens::<T>::get(class_id, basenode) {
+                pallet::Official::<T>::put(&token.owner);
+            }
+        }
+
+        #[extrinsic_call]
+        _(RawOrigin::Root, new_official.clone());
+
+        assert_eq!(pallet::Official::<T>::get(), Some(new_official));
+    }
+}

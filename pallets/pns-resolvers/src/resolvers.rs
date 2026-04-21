@@ -290,6 +290,71 @@ impl WeightInfo for () {
     fn set_record(_content_len: u32) -> Weight { Weight::from_parts(200_000_000, 2_000) }
 }
 
+#[cfg(feature = "runtime-benchmarks")]
+#[polkadot_sdk::frame_benchmarking::v2::benchmarks(
+    where T: pns_registrar::registrar::Config,
+)]
+mod benchmarks {
+    use super::*;
+    use polkadot_sdk::frame_benchmarking::v2::*;
+    use polkadot_sdk::frame_support::{traits::Currency, BoundedVec};
+    use polkadot_sdk::frame_system::RawOrigin;
+    use polkadot_sdk::sp_runtime::SaturatedConversion;
+    use polkadot_sdk::sp_std::vec;
+    use super::pallet::TextKind;
+
+    const BENCH_NAME: &[u8] = b"benchresolver";
+
+    /// Fund + register a canonical name for the caller so the
+    /// resolver's `check_node_useable` gate passes.
+    fn setup_owned_name<T>(caller: &T::AccountId)
+    where
+        T: pns_registrar::registrar::Config,
+    {
+        let big: pns_registrar::registrar::BalanceOf<T> =
+            (u128::MAX / 2).saturated_into();
+        <T as pns_registrar::registrar::Config>::Currency::make_free_balance_be(caller, big);
+        pns_registrar::registrar::Pallet::<T>::register(
+            RawOrigin::Signed(caller.clone()).into(),
+            BENCH_NAME.to_vec(),
+            None,
+        )
+        .expect("register_root bench setup");
+    }
+
+    #[benchmark]
+    fn set_record(s: Linear<0, 1024>) {
+        let caller: T::AccountId = whitelisted_caller();
+        setup_owned_name::<T>(&caller);
+        let content: Content<T> = BoundedVec::try_from(vec![0u8; s as usize])
+            .unwrap_or_else(|_| BoundedVec::try_from(vec![0u8; 1024]).unwrap());
+
+        #[extrinsic_call]
+        _(
+            RawOrigin::Signed(caller),
+            BENCH_NAME.to_vec(),
+            RecordType::TXT,
+            content,
+        );
+    }
+
+    #[benchmark]
+    fn set_text(s: Linear<0, 1024>) {
+        let caller: T::AccountId = whitelisted_caller();
+        setup_owned_name::<T>(&caller);
+        let content: Content<T> = BoundedVec::try_from(vec![0u8; s as usize])
+            .unwrap_or_else(|_| BoundedVec::try_from(vec![0u8; 1024]).unwrap());
+
+        #[extrinsic_call]
+        _(
+            RawOrigin::Signed(caller),
+            BENCH_NAME.to_vec(),
+            TextKind::Email,
+            content,
+        );
+    }
+}
+
 impl<C: Config> Pallet<C> {
     /// Write the SS58 record for `node` from the owner's encoded account bytes.
     ///

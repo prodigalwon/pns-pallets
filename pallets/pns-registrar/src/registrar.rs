@@ -1367,3 +1367,347 @@ impl<T: Config> crate::traits::NameRegistry for Pallet<T> {
         Ok(())
     }
 }
+
+#[cfg(feature = "runtime-benchmarks")]
+#[polkadot_sdk::frame_benchmarking::v2::benchmarks(
+    where
+        T: pallet::Config
+            + crate::price_oracle::Config
+            + crate::registry::Config
+            + crate::nft::Config
+            + polkadot_sdk::pallet_timestamp::Config<Moment = <T as pallet::Config>::Moment>,
+)]
+mod benchmarks {
+    use super::*;
+    use super::pallet::{
+        OfferedNames, RegistrarInfoOf, RegistrarInfos,
+    };
+    use polkadot_sdk::frame_benchmarking::v2::*;
+    use polkadot_sdk::frame_support::traits::{Currency, Get};
+    use polkadot_sdk::frame_system::RawOrigin;
+    use polkadot_sdk::sp_runtime::traits::{SaturatedConversion, StaticLookup, Zero};
+    use polkadot_sdk::sp_std::vec::Vec;
+    use crate::traits::Label;
+    use pns_types::{DomainHash, OfferedNameRecord};
+
+    fn seed_prices<T>()
+    where
+        T: pallet::Config + crate::price_oracle::Config,
+    {
+        type PriceBalanceOf<T> = <<T as crate::price_oracle::Config>::Currency
+            as Currency<<T as polkadot_sdk::frame_system::Config>::AccountId>>::Balance;
+        let unit: PriceBalanceOf<T> = 1_000_000_000_000u128.saturated_into();
+        let zero: PriceBalanceOf<T> = 0u32.into();
+        let one: PriceBalanceOf<T> = 1u32.into();
+        crate::price_oracle::BasePrice::<T>::put([unit; 11]);
+        crate::price_oracle::RentPrice::<T>::put([zero; 11]);
+        crate::price_oracle::ExchangeRate::<T>::put(one);
+    }
+
+    fn seed_basenode<T>(owner: &T::AccountId)
+    where
+        T: pallet::Config + crate::nft::Config + crate::registry::Config,
+    {
+        let class_id = <T as crate::nft::Config>::ClassId::zero();
+        let basenode = <T as pallet::Config>::BaseNode::get();
+
+        if crate::nft::Classes::<T>::get(class_id).is_none() {
+            let info = crate::nft::ClassInfo {
+                metadata: Default::default(),
+                total_issuance: Default::default(),
+                owner: owner.clone(),
+                data: Default::default(),
+            };
+            crate::nft::Classes::<T>::insert(class_id, info);
+        }
+
+        let tinfo = crate::nft::TokenInfo {
+            metadata: Default::default(),
+            owner: owner.clone(),
+            data: Default::default(),
+        };
+        crate::nft::Tokens::<T>::insert(class_id, basenode, tinfo);
+        crate::nft::TokensByOwner::<T>::insert((owner.clone(), class_id, basenode), ());
+
+        crate::registry::Official::<T>::put(owner);
+    }
+
+    fn seed_now<T>(t: <T as pallet::Config>::Moment)
+    where
+        T: pallet::Config
+            + polkadot_sdk::pallet_timestamp::Config<Moment = <T as pallet::Config>::Moment>,
+    {
+        polkadot_sdk::pallet_timestamp::Now::<T>::put(t);
+    }
+
+    fn fund<T: pallet::Config>(who: &T::AccountId) {
+        let big: BalanceOf<T> = (u128::MAX / 2).saturated_into();
+        T::Currency::make_free_balance_be(who, big);
+    }
+
+    fn setup_base<T>(official: &T::AccountId)
+    where
+        T: pallet::Config
+            + crate::price_oracle::Config
+            + crate::registry::Config
+            + crate::nft::Config
+            + polkadot_sdk::pallet_timestamp::Config<Moment = <T as pallet::Config>::Moment>,
+    {
+        seed_prices::<T>();
+        seed_basenode::<T>(official);
+        fund::<T>(official);
+        seed_now::<T>(1u32.into());
+    }
+
+    fn register_name<T>(caller: T::AccountId, name: &[u8]) -> DomainHash
+    where
+        T: pallet::Config
+            + crate::price_oracle::Config
+            + crate::registry::Config
+            + crate::nft::Config
+            + polkadot_sdk::pallet_timestamp::Config<Moment = <T as pallet::Config>::Moment>,
+    {
+        fund::<T>(&caller);
+        Pallet::<T>::register(
+            RawOrigin::Signed(caller).into(),
+            name.to_vec(),
+            None,
+        )
+        .expect("register bench setup");
+        let (label, _) = Label::new_with_len(name).expect("valid label");
+        label.encode_with_node(&<T as pallet::Config>::BaseNode::get())
+    }
+
+    #[benchmark]
+    fn add_reserved() {
+        let official: T::AccountId = account("official", 0, 0);
+        setup_base::<T>(&official);
+
+        #[extrinsic_call]
+        _(RawOrigin::Root, b"reserved1".to_vec());
+    }
+
+    #[benchmark]
+    fn remove_reserved() {
+        let official: T::AccountId = account("official", 0, 0);
+        setup_base::<T>(&official);
+        Pallet::<T>::add_reserved(RawOrigin::Root.into(), b"reserved1".to_vec())
+            .expect("add_reserved setup");
+
+        #[extrinsic_call]
+        _(RawOrigin::Root, b"reserved1".to_vec());
+    }
+
+    #[benchmark]
+    fn register(s: Linear<1, 10>) {
+        let official: T::AccountId = account("official", 0, 0);
+        setup_base::<T>(&official);
+        let caller: T::AccountId = whitelisted_caller();
+        fund::<T>(&caller);
+        let name: Vec<u8> = (0..s).map(|i| b'a' + (i as u8 % 26)).collect();
+
+        #[extrinsic_call]
+        _(RawOrigin::Signed(caller), name, None);
+    }
+
+    #[benchmark]
+    fn renew() {
+        let official: T::AccountId = account("official", 0, 0);
+        setup_base::<T>(&official);
+        let caller: T::AccountId = whitelisted_caller();
+        let _ = register_name::<T>(caller.clone(), b"renewbench");
+
+        #[extrinsic_call]
+        _(RawOrigin::Signed(caller));
+    }
+
+    #[benchmark]
+    fn transfer() {
+        let official: T::AccountId = account("official", 0, 0);
+        setup_base::<T>(&official);
+        let caller: T::AccountId = whitelisted_caller();
+        let _ = register_name::<T>(caller.clone(), b"xferbench");
+        let dest: T::AccountId = account("dest", 0, 0);
+        fund::<T>(&dest);
+        let dest_src = T::Lookup::unlookup(dest);
+
+        #[extrinsic_call]
+        _(RawOrigin::Signed(caller), dest_src);
+    }
+
+    #[benchmark]
+    fn release_name() {
+        let official: T::AccountId = account("official", 0, 0);
+        setup_base::<T>(&official);
+        let caller: T::AccountId = whitelisted_caller();
+        let _ = register_name::<T>(caller.clone(), b"releasebench");
+
+        #[extrinsic_call]
+        _(RawOrigin::Signed(caller));
+    }
+
+    #[benchmark]
+    fn offer_subdomain(s: Linear<1, 32>) {
+        let official: T::AccountId = account("official", 0, 0);
+        setup_base::<T>(&official);
+        let parent_owner: T::AccountId = whitelisted_caller();
+        let _ = register_name::<T>(parent_owner.clone(), b"parentoffer");
+        let target: T::AccountId = account("target", 0, 0);
+        let target_src = T::Lookup::unlookup(target);
+        let label: Vec<u8> = (0..s).map(|i| b'a' + (i as u8 % 26)).collect();
+
+        #[extrinsic_call]
+        _(RawOrigin::Signed(parent_owner), label, target_src);
+    }
+
+    #[benchmark]
+    fn accept_subdomain() {
+        let official: T::AccountId = account("official", 0, 0);
+        setup_base::<T>(&official);
+        let parent_owner: T::AccountId = whitelisted_caller();
+        let _ = register_name::<T>(parent_owner.clone(), b"parentaccept");
+        let target: T::AccountId = account("target", 0, 0);
+        let target_src = T::Lookup::unlookup(target.clone());
+        Pallet::<T>::offer_subdomain(
+            RawOrigin::Signed(parent_owner).into(),
+            b"sub".to_vec(),
+            target_src,
+        )
+        .expect("offer subdomain setup");
+
+        #[extrinsic_call]
+        _(RawOrigin::Signed(target), b"parentaccept".to_vec(), b"sub".to_vec());
+    }
+
+    #[benchmark]
+    fn reject_subdomain() {
+        let official: T::AccountId = account("official", 0, 0);
+        setup_base::<T>(&official);
+        let parent_owner: T::AccountId = whitelisted_caller();
+        let _ = register_name::<T>(parent_owner.clone(), b"parentreject");
+        let target: T::AccountId = account("target", 0, 0);
+        let target_src = T::Lookup::unlookup(target.clone());
+        Pallet::<T>::offer_subdomain(
+            RawOrigin::Signed(parent_owner).into(),
+            b"sub".to_vec(),
+            target_src,
+        )
+        .expect("offer subdomain setup");
+
+        #[extrinsic_call]
+        _(RawOrigin::Signed(target), b"parentreject".to_vec(), b"sub".to_vec());
+    }
+
+    #[benchmark]
+    fn revoke_subdomain() {
+        let official: T::AccountId = account("official", 0, 0);
+        setup_base::<T>(&official);
+        let parent_owner: T::AccountId = whitelisted_caller();
+        let _ = register_name::<T>(parent_owner.clone(), b"parentrevoke");
+        let target: T::AccountId = account("target", 0, 0);
+        let target_src = T::Lookup::unlookup(target);
+        Pallet::<T>::offer_subdomain(
+            RawOrigin::Signed(parent_owner.clone()).into(),
+            b"sub".to_vec(),
+            target_src,
+        )
+        .expect("offer subdomain setup");
+
+        #[extrinsic_call]
+        _(RawOrigin::Signed(parent_owner), b"sub".to_vec());
+    }
+
+    #[benchmark]
+    fn release_subdomain() {
+        let official: T::AccountId = account("official", 0, 0);
+        setup_base::<T>(&official);
+        let parent_owner: T::AccountId = whitelisted_caller();
+        let _ = register_name::<T>(parent_owner.clone(), b"parentrelease");
+        let target: T::AccountId = account("target", 0, 0);
+        let target_src = T::Lookup::unlookup(target.clone());
+        Pallet::<T>::offer_subdomain(
+            RawOrigin::Signed(parent_owner).into(),
+            b"sub".to_vec(),
+            target_src,
+        )
+        .expect("offer subdomain setup");
+        Pallet::<T>::accept_subdomain(
+            RawOrigin::Signed(target.clone()).into(),
+            b"parentrelease".to_vec(),
+            b"sub".to_vec(),
+        )
+        .expect("accept subdomain setup");
+
+        #[extrinsic_call]
+        _(RawOrigin::Signed(target), b"parentrelease".to_vec(), b"sub".to_vec());
+    }
+
+    #[benchmark]
+    fn accept_offered_name() {
+        let official: T::AccountId = account("official", 0, 0);
+        setup_base::<T>(&official);
+        let buyer: T::AccountId = account("buyer", 0, 0);
+        let recipient: T::AccountId = whitelisted_caller();
+        fund::<T>(&recipient);
+
+        let name = b"gifted".to_vec();
+        let (label, label_len) = Label::new_with_len(&name).expect("valid label");
+        let node = label.encode_with_node(&<T as pallet::Config>::BaseNode::get());
+
+        let class_id = <T as crate::nft::Config>::ClassId::zero();
+        let tinfo = crate::nft::TokenInfo {
+            metadata: Default::default(),
+            owner: recipient.clone(),
+            data: Default::default(),
+        };
+        crate::nft::Tokens::<T>::insert(class_id, node, tinfo);
+        crate::nft::TokensByOwner::<T>::insert((recipient.clone(), class_id, node), ());
+
+        let now = <T as pallet::Config>::NowProvider::now();
+        let max_dur = <T as pallet::Config>::MaxRegistrationDuration::get();
+        let expire = now.checked_add(&max_dur).expect("expire fits");
+        let register_fee: BalanceOf<T> = 1_000_000_000_000u128.saturated_into();
+        RegistrarInfos::<T>::insert(
+            node,
+            RegistrarInfoOf::<T> {
+                register_fee,
+                expire,
+                capacity: <T as pallet::Config>::DefaultCapacity::get(),
+                label_len: label_len as u32,
+                last_block: 0u32,
+            },
+        );
+
+        let offered: OfferedNameRecord<T::AccountId, <T as pallet::Config>::Moment> =
+            OfferedNameRecord {
+                buyer,
+                recipient: recipient.clone(),
+                offered_at: now,
+            };
+        OfferedNames::<T>::insert(node, offered);
+
+        #[extrinsic_call]
+        _(RawOrigin::Signed(recipient), name);
+    }
+
+    #[benchmark]
+    fn cleanup() {
+        let official: T::AccountId = account("official", 0, 0);
+        setup_base::<T>(&official);
+        let caller: T::AccountId = whitelisted_caller();
+        fund::<T>(&caller);
+        let registrant: T::AccountId = account("reg", 0, 0);
+        let _ = register_name::<T>(registrant, b"cleanbench");
+
+        let one: <T as pallet::Config>::Moment = 1u32.into();
+        let max_dur = <T as pallet::Config>::MaxRegistrationDuration::get();
+        let grace = <T as pallet::Config>::GracePeriod::get();
+        let expire = one + max_dur;
+        let deadline = expire + grace;
+        let advanced = deadline + one;
+        seed_now::<T>(advanced);
+
+        #[extrinsic_call]
+        _(RawOrigin::Signed(caller), deadline);
+    }
+}

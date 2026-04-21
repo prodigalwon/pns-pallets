@@ -164,6 +164,43 @@ pub mod pallet {
 }
 use crate::traits::{ExchangeRate as ExchangeRateT, PriceOracle};
 
+#[cfg(feature = "runtime-benchmarks")]
+#[polkadot_sdk::frame_benchmarking::v2::benchmarks]
+mod benchmarks {
+    use super::*;
+    use polkadot_sdk::frame_benchmarking::v2::*;
+    use polkadot_sdk::frame_system::RawOrigin;
+
+    fn price_array<T: Config>() -> [BalanceOf<T>; 11] {
+        let one: BalanceOf<T> = 1_000_000u32.into();
+        [one; 11]
+    }
+
+    #[benchmark]
+    fn set_exchange_rate() {
+        let rate: BalanceOf<T> = 42_000_000u32.into();
+        #[extrinsic_call]
+        _(RawOrigin::Root, rate);
+        assert_eq!(ExchangeRate::<T>::get(), rate);
+    }
+
+    #[benchmark]
+    fn set_base_price() {
+        let prices = price_array::<T>();
+        #[extrinsic_call]
+        _(RawOrigin::Root, prices);
+        assert_eq!(BasePrice::<T>::get(), prices);
+    }
+
+    #[benchmark]
+    fn set_rent_price() {
+        let prices = price_array::<T>();
+        #[extrinsic_call]
+        _(RawOrigin::Root, prices);
+        assert_eq!(RentPrice::<T>::get(), prices);
+    }
+}
+
 pub trait WeightInfo {
     fn set_exchange_rate() -> Weight;
     fn set_base_price() -> Weight;

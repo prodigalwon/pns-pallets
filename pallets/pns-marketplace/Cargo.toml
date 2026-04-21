@@ -12,7 +12,7 @@ version = "0.1.0"
 targets = ['x86_64-unknown-linux-gnu']
 
 [dependencies]
-polkadot-sdk = { workspace = true, features = ["runtime"] }
+polkadot-sdk = { workspace = true, features = ["runtime", "pallet-timestamp"] }
 codec = { workspace = true }
 scale-info = { workspace = true }
 serde = { workspace = true }
@@ -35,5 +35,8 @@ std = [
     'pns-types/std',
     'pns-registrar/std',
 ]
-runtime-benchmarks = ['polkadot-sdk/runtime-benchmarks']
+runtime-benchmarks = [
+    'polkadot-sdk/runtime-benchmarks',
+    'pns-registrar/runtime-benchmarks',
+]
 try-runtime = ['polkadot-sdk/try-runtime']

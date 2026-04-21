@@ -19,7 +19,6 @@ serde = { workspace = true }
 
 [dependencies.pns-registrar]
 default-features = false
-features = ['runtime-benchmarks']
 optional = true
 path = "../pns-registrar"
 
@@ -34,7 +33,11 @@ std = [
     'codec/std',
     'scale-info/std',
     'serde/std',
-    'pns-types/std'
+    'pns-types/std',
+    'pns-registrar?/std',
 ]
-runtime-benchmarks = ['polkadot-sdk/runtime-benchmarks', 'pns-registrar']
+runtime-benchmarks = [
+    'polkadot-sdk/runtime-benchmarks',
+    'pns-registrar/runtime-benchmarks',
+]
 try-runtime = ['polkadot-sdk/try-runtime']

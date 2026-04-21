@@ -13,7 +13,7 @@ targets = ['x86_64-unknown-linux-gnu']
 
 
 [dependencies]
-polkadot-sdk = { workspace = true, features = ["runtime"] }
+polkadot-sdk = { workspace = true, features = ["runtime", "pallet-timestamp"] }
 codec = { workspace = true }
 scale-info = { workspace = true }
 serde = { workspace = true }

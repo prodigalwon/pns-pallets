@@ -146,18 +146,18 @@ impl<T: Config> EnsureOrigin<T::RuntimeOrigin> for Pallet<T> {
     }
 
     #[cfg(feature = "runtime-benchmarks")]
-    fn successful_origin() -> T::RuntimeOrigin {
+    fn try_successful_origin() -> Result<T::RuntimeOrigin, ()> {
         use codec::Decode;
 
         if let Some(o) = Origins::<T>::iter_keys().next() {
-            return T::RuntimeOrigin::from(RawOrigin::Signed(o));
+            return Ok(T::RuntimeOrigin::from(RawOrigin::Signed(o)));
         }
 
         let zero_account_id =
             T::AccountId::decode(&mut polkadot_sdk::sp_runtime::traits::TrailingZeroInput::zeroes())
-                .expect("infinite length input; no invalid inputs for type; qed");
+                .map_err(|_| ())?;
 
-        T::RuntimeOrigin::from(RawOrigin::Signed(zero_account_id))
+        Ok(T::RuntimeOrigin::from(RawOrigin::Signed(zero_account_id)))
     }
 }
 
