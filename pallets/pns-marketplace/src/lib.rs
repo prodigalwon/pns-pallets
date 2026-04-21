@@ -338,13 +338,12 @@ pub mod pallet {
             } else {
                 T::NameRegistry::transfer_name(&listing.seller, &buyer, node)?;
 
+                // ORIGIN is intentionally NOT rewritten on marketplace sale —
+                // it pins the initial registration block of the name, which must
+                // survive ownership changes so off-chain reputation / seniority
+                // consumers can trust `pns_getInfo`'s ORIGIN record.
                 T::RecordCleaner::clear_records_except_ss58(node);
                 T::Ss58Updater::update_ss58(node, &buyer)?;
-                let parent_hash: [u8; 32] = polkadot_sdk::frame_system::Pallet::<T>::parent_hash()
-                    .as_ref()
-                    .try_into()
-                    .map_err(|_| Error::<T>::InternalHashConversion)?;
-                T::OriginRecorder::record_origin(node, parent_hash)?;
 
                 Self::deposit_event(Event::<T>::Sold {
                     node,

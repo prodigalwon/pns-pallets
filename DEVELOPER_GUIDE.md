@@ -212,9 +212,13 @@ async function register() {
   const keyring = new Keyring({ type: 'sr25519' });
   const alice = keyring.addFromUri('//Alice');
 
+  // register(name, reject_offer) — owner is always the signing caller.
+  // To gift a name to another account, use the marketplace buy-for-recipient
+  // or subdomain offer flow; both feed into the recipient-consented
+  // `OfferedNames` / `accept_offered_name` path.
   const tx = api.tx.pnsRegistrar.register(
     '0x616c696365', // hex for "alice"
-    alice.address   // owner = caller
+    null            // reject_offer: Option<Vec<u8>>
   );
 
   const hash = await tx.signAndSend(alice);
@@ -637,8 +641,9 @@ async function marketplaceDemo() {
 
   const aliceName = '0x616c696365'; // "alice"
 
-  // 1. Alice registers "alice"
-  await api.tx.pnsRegistrar.register(aliceName, alice.address)
+  // 1. Alice registers "alice" (owner is always the caller; no recipient
+  // param — use the offer/accept flow to gift).
+  await api.tx.pnsRegistrar.register(aliceName, null)
     .signAndSend(alice, { nonce: -1 });
 
   // 2. Alice lists for 5 DOT, expires in 7 days

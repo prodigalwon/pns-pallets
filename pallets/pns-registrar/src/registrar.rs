@@ -389,13 +389,18 @@ pub mod pallet {
             Self::deposit_event(Event::<T>::NameUnReserved { node });
             Ok(())
         }
-        /// Register a domain name.
+        /// Register a domain name for the caller.
         ///
         /// Note: The domain name must conform to the rules,
         /// while the interface is only responsible for
         /// registering domain names greater than 10 in length.
         ///
         /// Ensure: The name must be unoccupied.
+        ///
+        /// The registrant is always the signing caller. To gift a name to another
+        /// account, purchase via the marketplace's buy-for-recipient path or use
+        /// the subdomain offer flow — both feed into `OfferedNames` /
+        /// `accept_offered_name`, which validates recipient consent.
         ///
         /// `reject_offer`: Optional — reject a pending offered name (top-level or subdomain) before
         /// registering. Pass the plain label (e.g. `b"bob"` or `b"sub.parent"`) of the name to
@@ -408,11 +413,9 @@ pub mod pallet {
         pub fn register(
             origin: OriginFor<T>,
             name: Vec<u8>,
-            owner: <T::Lookup as StaticLookup>::Source,
             reject_offer: Option<Vec<u8>>,
         ) -> DispatchResult {
             let caller = ensure_signed(origin)?;
-            let owner = T::Lookup::lookup(owner)?;
 
             // Reject a pending offered name before registering, if requested.
             if let Some(ref reject_name) = reject_offer {
@@ -470,17 +473,17 @@ pub mod pallet {
             }
 
             // Enforce one name per address: no canonical name and no active subdomain.
-            if let Some(existing_node) = OwnerToPrimaryName::<T>::get(&owner) {
+            if let Some(existing_node) = OwnerToPrimaryName::<T>::get(&caller) {
                 let still_valid = RegistrarInfos::<T>::get(existing_node)
                     .map(|info| info.expire.checked_add(&T::GracePeriod::get()).map_or(false, |d| now <= d))
                     .unwrap_or(false);
                 if still_valid {
                     return Err(Error::<T>::AlreadyHasCanonicalName.into());
                 }
-                // Expired canonical name – remove the stale entry so the owner can register anew.
-                OwnerToPrimaryName::<T>::remove(&owner);
+                // Expired canonical name – remove the stale entry so the caller can register anew.
+                OwnerToPrimaryName::<T>::remove(&caller);
             }
-            ensure!(!T::Registry::has_active_subname(&owner), Error::<T>::AlreadyHoldsSubdomain);
+            ensure!(!T::Registry::has_active_subname(&caller), Error::<T>::AlreadyHoldsSubdomain);
 
             let fee = T::PriceOracle::registration_fee(label_len)
                 .ok_or(ArithmeticError::Overflow)?;
@@ -489,7 +492,7 @@ pub mod pallet {
                 &official,
                 base_node,
                 label_node,
-                owner.clone(),
+                caller.clone(),
                 0,
                 |maybe_pre_owner| -> DispatchResult {
                     // If this name was previously owned by someone else, remove their
@@ -501,6 +504,15 @@ pub mod pallet {
                     }
                     let deposit = fee / 20u32.into(); // 5% — held on registrant
                     let spendable = fee - deposit;
+                    // Release any prior registrant's cleanup hold before placing the new one.
+                    // Without this, a re-registration after the prior holder's grace period
+                    // ends (without anyone calling `cleanup()`) strands the prior deposit —
+                    // `HoldReason::CleanupDeposit` is releasable only by this pallet, and
+                    // the storage row we're about to overwrite was the only index pointing
+                    // to the prior holder's held funds. Mirrors `renew` and `transfer`.
+                    if let Some((old_depositor, old_amount)) = CleanupDeposit::<T>::take(label_node) {
+                        let _ = Self::release_cleanup_hold(&old_depositor, old_amount, ReleaseReason::Replaced);
+                    }
                     // Place a pallet-scoped hold on the registrant's account.
                     T::Fungible::hold(
                         &HoldReason::CleanupDeposit.into(),
@@ -559,11 +571,11 @@ pub mod pallet {
                 },
             )?;
 
-            // Record this as the owner's canonical name.
-            OwnerToPrimaryName::<T>::insert(&owner, label_node);
+            // Record this as the caller's canonical name.
+            OwnerToPrimaryName::<T>::insert(&caller, label_node);
 
             // Write the SS58 record so DNS lookups immediately resolve to the new owner.
-            T::Ss58Updater::update_ss58(label_node, &owner)?;
+            T::Ss58Updater::update_ss58(label_node, &caller)?;
 
             // Write the ORIGIN record — parent block hash as proof of registration block.
             let parent_hash: [u8; 32] = polkadot_sdk::frame_system::Pallet::<T>::parent_hash()
@@ -575,7 +587,7 @@ pub mod pallet {
             Self::deposit_event(Event::<T>::NameRegistered {
                 name,
                 node: label_node,
-                owner,
+                owner: caller,
                 expire,
                 fee,
             });

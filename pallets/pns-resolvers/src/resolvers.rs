@@ -326,10 +326,18 @@ impl<C: Config> Pallet<C> {
     /// DNS data (RPC endpoints, validator stash, parachain IDs, etc.) from
     /// the previous owner.  `Texts` are intentionally left
     /// untouched — only `Records` entries are cleared here.
+    ///
+    /// `SS58` is preserved because the transfer path writes the new owner's
+    /// SS58 immediately after, and `ORIGIN` is preserved because it pins
+    /// the initial registration block of the name — proof-of-registration
+    /// attestations (reputation scoring, seniority, etc.) depend on ORIGIN
+    /// surviving ownership changes. Overwriting or wiping ORIGIN on transfer
+    /// would let a round-trip sale forge "proof of registration block" for
+    /// any `pns_getInfo` consumer.
     pub fn clear_records_except_ss58(node: DomainHash) {
         const MAX_CLEANUP: usize = 100;
         let to_remove: Vec<RecordType> = pallet::Records::<C>::iter_prefix(node)
-            .filter(|(rt, _)| *rt != RecordType::SS58)
+            .filter(|(rt, _)| *rt != RecordType::SS58 && *rt != RecordType::ORIGIN)
             .take(MAX_CLEANUP)
             .map(|(rt, _)| rt)
             .collect();

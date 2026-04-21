@@ -271,6 +271,24 @@ impl_runtime_apis! {
 	impl pns_runtime_api::PnsStorageApi<Block, u64, Balance, AccountId> for Runtime {
 		fn get_info(id: pns_types::DomainHash) -> Option<pns_types::NameRecord<AccountId, u64, Balance>> {
 			use frame_support::traits::Time;
+			// Reserved names resolve to a sentinel record so clients
+			// checking `is_none()` for availability correctly see them
+			// as taken. Avoids users paying a register fee only to hit
+			// `Error::Frozen`. Fields other than `for_sale: false` are
+			// meaningless — the FAQ explains that a name which never
+			// seems to expire is reserved.
+			if pns_registrar::registrar::ReservedList::<Runtime>::contains_key(id) {
+				return Some(pns_types::NameRecord {
+					owner: Default::default(),
+					expire: u64::MAX,
+					capacity: 0,
+					register_fee: 0,
+					for_sale: false,
+					last_block: 0,
+					read_block_number: 0,
+					read_block_hash: Default::default(),
+				});
+			}
 			// Names in active offered state are not yet active — return null until the
 			// recipient accepts or the 90-day offer window expires.
 			if let Some(offer) = pns_registrar::registrar::OfferedNames::<Runtime>::get(id) {
@@ -319,6 +337,20 @@ impl_runtime_apis! {
 			let (label, _) = Label::new_with_len(&name)?;
 			let base_node = pns_types::NATIVE_BASENODE;
 			let node = label.encode_with_node(&base_node);
+			// Reserved names resolve to a sentinel record — see
+			// `get_info` for rationale.
+			if pns_registrar::registrar::ReservedList::<Runtime>::contains_key(node) {
+				return Some(pns_types::NameRecord {
+					owner: Default::default(),
+					expire: u64::MAX,
+					capacity: 0,
+					register_fee: 0,
+					for_sale: false,
+					last_block: 0,
+					read_block_number: 0,
+					read_block_hash: Default::default(),
+				});
+			}
 			// Names in active offered state are not yet active — return null until the
 			// recipient accepts or the 90-day offer window expires.
 			if let Some(offer) = pns_registrar::registrar::OfferedNames::<Runtime>::get(node) {

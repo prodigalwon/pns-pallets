@@ -471,14 +471,13 @@ pub mod pallet {
 
             nft::Pallet::<T>::transfer(&owner, to, (class_id, token))?;
 
-            // Clear stale DNS records from the previous owner, then update SS58 and ORIGIN.
+            // Clear stale DNS records from the previous owner, then update SS58.
+            // ORIGIN is intentionally NOT rewritten here — it pins the initial
+            // registration block and must survive ownership changes (trait doc at
+            // `traits.rs:OriginRecorder`). Overwriting on transfer would forge
+            // "proof of registration block" for any consumer of `pns_getInfo`.
             T::RecordCleaner::clear_records_except_ss58(token);
             T::Ss58Updater::update_ss58(token, to)?;
-            let parent_hash: [u8; 32] = polkadot_sdk::frame_system::Pallet::<T>::parent_hash()
-                .as_ref()
-                .try_into()
-                .map_err(|_| Error::<T>::InternalHashConversion)?;
-            T::OriginRecorder::record_origin(token, parent_hash)?;
 
             Self::deposit_event(Event::<T>::Transferred {
                 from: owner,
@@ -741,6 +740,28 @@ impl<T: pallet::Config> crate::traits::Registry for pallet::Pallet<T> {
             pallet::AccountToSubnames::<T>::insert(acceptor, label_node, ());
             Ok(())
         })?;
+
+        // Mint the canonical NFT to the acceptor. The resolver's ownership gate
+        // (`RegistryChecker::check_node_useable` → `registry::Pallet::verify` →
+        // `nft::Pallet::tokens(0, node)`) requires an NFT entry; without this
+        // the acceptor holds a subname record but cannot call `set_record` /
+        // `set_text` etc. — the feature was unreachable before this fix. NFTs
+        // remain the canonical ownership token everywhere in PNS.
+        use polkadot_sdk::sp_runtime::traits::Zero;
+        let class_id = T::ClassId::zero();
+        crate::nft::Pallet::<T>::mint(
+            acceptor,
+            (class_id, label_node),
+            polkadot_sdk::sp_std::vec::Vec::new(),
+            Default::default(),
+        )?;
+        // Track the subname's domain origin as rooted at the parent so
+        // downstream lookups (chain walks, cleanup on root release) can
+        // resolve the lineage.
+        pallet::RuntimeOrigin::<T>::insert(
+            label_node,
+            pns_types::DomainTracing::RuntimeOrigin(parent),
+        );
         Ok(parent)
     }
 

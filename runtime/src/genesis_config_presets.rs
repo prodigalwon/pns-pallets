@@ -97,10 +97,14 @@ fn testnet_genesis(
 		pns_registrar: pns_registrar::registrar::GenesisConfig {
 			infos: Default::default(),
 			reserved_list: Default::default(),
-			// Names reserved at the request of the Polkadot Technical Fellowship.
-			// These labels can never be registered by end users.
-			// To add more after genesis, use the `add_reserved` extrinsic (manager-only).
+			// Names reserved at genesis. These labels can never be
+			// registered by end users. To add more after genesis, use
+			// the `add_reserved` extrinsic (manager-only). Note: the
+			// label validator rejects hyphens, so e.g. `zk-pki` cannot
+			// be listed here — its alphanumeric form `zkpki` covers
+			// the product namespace.
 			reserved_names: vec![
+				// Polkadot Technical Fellowship — ecosystem names.
 				b"polkadot".to_vec(),
 				b"kusama".to_vec(),
 				b"paseo".to_vec(),
@@ -116,6 +120,33 @@ fn testnet_genesis(
 				b"jam".to_vec(),
 				b"people".to_vec(),
 				b"dap".to_vec(),
+				// Brand protection.
+				b"substrate".to_vec(),
+				// Infrastructure — operator-owned subdomains that
+				// must not be user-registerable.
+				b"www".to_vec(),
+				b"docs".to_vec(),
+				b"api".to_vec(),
+				b"rpc".to_vec(),
+				b"status".to_vec(),
+				b"admin".to_vec(),
+				b"faucet".to_vec(),
+				b"node".to_vec(),
+				// First-party products and project codenames.
+				b"honu".to_vec(),
+				b"saba".to_vec(),
+				b"catamaran".to_vec(),
+				b"orca".to_vec(),
+				b"dotwave".to_vec(),
+				b"snorkel".to_vec(),
+				b"zkpki".to_vec(),
+				b"pns".to_vec(),
+				b"pns2".to_vec(),
+				b"registry".to_vec(),
+				b"explorer".to_vec(),
+				b"gateway".to_vec(),
+				b"resolver".to_vec(),
+				b"badger".to_vec(),
 			],
 		},
 	})
